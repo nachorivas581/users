@@ -1,0 +1,2335 @@
+import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
+import {
+  StyleSheet,
+  Text,
+  View,
+  ActivityIndicator,
+  TextInput,
+  StatusBar,
+  Dimensions,
+  PanResponder,
+  FlatList,
+  TouchableOpacity,
+  ScrollView,
+  Animated,
+  Easing,
+  Image,
+  Platform,
+  UIManager,
+  LayoutAnimation,
+  RefreshControl,
+  Modal,
+  Alert,
+} from 'react-native';
+import { WebView, WebViewMessageEvent } from 'react-native-webview';
+import { useVideoPlayer, VideoView } from 'expo-video';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Ionicons } from '@expo/vector-icons';
+import * as Haptics from 'expo-haptics';
+
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+
+const { width: W, height: H } = Dimensions.get('window');
+
+/* ═══════════════════════════════════════════════════════════
+   CONFIGURACIÓN
+═══════════════════════════════════════════════════════════ */
+const TMDB_API_KEY = 'cd567a4b1c99d7e5acebd57afda5a196';
+
+const ACCENT_COLORS: Record<string, string> = {
+  violet: '#6C63FF',
+  blue:   '#3B82F6',
+  red:    '#E50914',
+  green:  '#10B981',
+};
+
+/* ═══════════════════════════════════════════════════════════
+   DESIGN TOKENS — NexusTV Premium
+═══════════════════════════════════════════════════════════ */
+const T = {
+  color: {
+    bg:              '#080810',
+    surface:         '#0F0F1E',
+    surfaceElevated: '#161628',
+    overlay:         'rgba(8,8,16,0.85)',
+    overlayLight:    'rgba(8,8,16,0.55)',
+    border:          'rgba(255,255,255,0.07)',
+    borderGlow:      'rgba(229,9,20,0.35)',
+    primary:         '#E50914',
+    primaryDim:      'rgba(229,9,20,0.18)',
+    primaryGlow:     'rgba(229,9,20,0.6)',
+    gold:            '#F5A623',
+    goldDim:         'rgba(245,166,35,0.15)',
+    blue:            '#1A78C2',
+    blueDim:         'rgba(26,120,194,0.18)',
+    textPrimary:     '#FFFFFF',
+    textSecondary:   'rgba(255,255,255,0.65)',
+    textMuted:       'rgba(255,255,255,0.35)',
+    success:         '#21D07A',
+    live:            '#FF2D55',
+  },
+  font: {
+    xs: 11, sm: 13, base: 15, md: 17, lg: 20, xl: 24, xxl: 30, hero: 40,
+    regular: '400' as const, medium: '500' as const, semibold: '600' as const,
+    bold: '700' as const, extrabold: '800' as const, black: '900' as const,
+    tight: -0.5, normal: 0, wide: 0.5, wider: 1.2, widest: 2.5,
+  },
+  space: { xs: 4, sm: 8, md: 14, lg: 20, xl: 28, xxl: 40 },
+  radius: { sm: 6, md: 10, lg: 16, xl: 22, full: 999 },
+  shadow: {
+    card: {
+      shadowColor: '#000', shadowOffset: { width: 0, height: 8 },
+      shadowOpacity: 0.55, shadowRadius: 16, elevation: 14,
+    },
+    glow: {
+      shadowColor: '#E50914', shadowOffset: { width: 0, height: 0 },
+      shadowOpacity: 0.7, shadowRadius: 18, elevation: 18,
+    },
+    goldGlow: {
+      shadowColor: '#F5A623', shadowOffset: { width: 0, height: 0 },
+      shadowOpacity: 0.5, shadowRadius: 14, elevation: 14,
+    },
+  },
+};
+
+/* ═══════════════════════════════════════════════════════════
+   DETECCIÓN DE DISPOSITIVO Y ESCALA
+═══════════════════════════════════════════════════════════ */
+const IS_TV     = Platform.isTV || W >= 960;
+const IS_TABLET = !IS_TV && W >= 600;
+const IS_SMALL  = !IS_TV && !IS_TABLET && W <= 480;
+
+const SCALE = IS_TV ? 1.6 : IS_TABLET ? 1.25 : IS_SMALL ? 0.88 : 1;
+
+const s  = (n: number) => Math.round(n * SCALE);
+const fs = (n: number) => Math.round(n * SCALE);
+
+const MINI_PLAYER_HEIGHT = IS_TV
+  ? Math.round(W * 0.4)
+  : IS_TABLET ? 260
+  : IS_SMALL  ? 170
+  : 200;
+
+const MEDIA_COLS  = IS_TV ? 4 : IS_TABLET ? 3 : 2;
+const MEDIA_W_PCT = IS_TV ? '23%' : IS_TABLET ? '31.3%' : '48%';
+
+/* ═══════════════════════════════════════════════════════════
+   TIPOS
+═══════════════════════════════════════════════════════════ */
+interface Canal {
+  id: string;
+  numero: number;
+  name: string;
+  url: string;
+  logo: string;
+  category: string;
+  nowPlaying?: string;
+  needsWebView?: boolean;
+}
+
+interface MediaItem {
+  id: string;
+  title: string;
+  poster: string;
+  backdrop?: string;
+  genre?: string;
+  year?: number;
+  rating?: string;
+  seasons?: number;
+  overview?: string;
+  type?: 'movie' | 'tv';
+  custom?: boolean;
+  streamUrl?: string;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   DATOS DE RESPALDO
+═══════════════════════════════════════════════════════════ */
+const MOVIES_FALLBACK: MediaItem[] = [
+  {
+    id: 'mov1', title: 'Inception',
+    poster: 'https://image.tmdb.org/t/p/w500/9gk7adHYeDvHkCSEqAvQNLV5Uge.jpg',
+    genre: 'Ciencia ficción', year: 2010, rating: '8.8',
+    overview: 'Un ladrón especializado en el robo de secretos corporativos...',
+  },
+  {
+    id: 'mov2', title: 'Interstellar',
+    poster: 'https://image.tmdb.org/t/p/w500/gEU2QniE6E77NI6lCU6MxlNBvIx.jpg',
+    genre: 'Ciencia ficción', year: 2014, rating: '8.6',
+  },
+];
+
+const SERIES_FALLBACK: MediaItem[] = [
+  {
+    id: 'ser1', title: 'Breaking Bad',
+    poster: 'https://image.tmdb.org/t/p/w500/ggFHVNu6YYI5L9pCfOacjizRGt.jpg',
+    genre: 'Drama', seasons: 5, rating: '9.5',
+    overview: 'Un profesor de química con cáncer terminal...',
+  },
+  {
+    id: 'ser2', title: 'Stranger Things',
+    poster: 'https://image.tmdb.org/t/p/w500/49WJfeN0moxb9IPfGn8AIqMGskD.jpg',
+    genre: 'Ciencia ficción', seasons: 4, rating: '8.7',
+  },
+];
+
+/* ═══════════════════════════════════════════════════════════
+   CANALES PREDEFINIDOS
+═══════════════════════════════════════════════════════════ */
+const CANALES_MANUALES: Canal[] = [
+  { id: 'man-1',  numero: 1,  name: 'DSports',        url: 'https://streamtpday1.xyz/global1.php?stream=dsports',      logo: 'https://upload.wikimedia.org/wikipedia/commons/d/df/DirecTV_Sports_logo.png', category: 'Deportes', nowPlaying: 'Fútbol: Copa Libertadores' },
+  { id: 'man-2',  numero: 2,  name: 'DSports 2',      url: 'https://streamtpday1.xyz/global1.php?stream=dsports2',     logo: '', category: 'Deportes', nowPlaying: 'Tenis: Wimbledon' },
+  { id: 'man-3',  numero: 3,  name: 'DSports +',      url: 'https://streamtpday1.xyz/global1.php?stream=dsportsplus',  logo: '', category: 'Deportes', nowPlaying: 'Motociclismo: MotoGP' },
+  { id: 'man-4',  numero: 4,  name: 'TyC Sports',     url: 'https://streamtpday1.xyz/global1.php?stream=tyc',          logo: '', category: 'Deportes', nowPlaying: 'Noticias Deportivas' },
+  { id: 'man-5',  numero: 5,  name: 'TNT Sports',     url: 'https://streamtpday1.xyz/global1.php?stream=tntsports',    logo: '', category: 'Deportes', nowPlaying: 'Fútbol Argentino' },
+  { id: 'man-6',  numero: 6,  name: 'ESPN Premium',   url: 'https://streamtpday1.xyz/global1.php?stream=espnpremium',  logo: '', category: 'Deportes', nowPlaying: 'Fútbol Europeo' },
+  { id: 'man-7',  numero: 7,  name: 'ESPN 1',         url: 'https://streamtpday1.xyz/global1.php?stream=espn',         logo: '', category: 'Deportes', nowPlaying: 'Baloncesto NBA' },
+  { id: 'man-8',  numero: 8,  name: 'ESPN 2',         url: 'https://streamtpday1.xyz/global1.php?stream=espn2',        logo: '', category: 'Deportes', nowPlaying: 'Béisbol MLB' },
+  { id: 'man-9',  numero: 9,  name: 'ESPN 3',         url: 'https://streamtpday1.xyz/global1.php?stream=espn3',        logo: '', category: 'Deportes', nowPlaying: 'Programa de Análisis' },
+  { id: 'man-10', numero: 10, name: 'ESPN 4',         url: 'https://streamtpday1.xyz/global1.php?stream=espn4',        logo: '', category: 'Deportes', nowPlaying: 'Rugby' },
+  { id: 'man-11', numero: 11, name: 'ESPN 5',         url: 'https://streamtpday1.xyz/global1.php?stream=espn5',        logo: '', category: 'Deportes', nowPlaying: 'Hockey' },
+  { id: 'man-12', numero: 12, name: 'Claro Sports',   url: 'https://pluto.tv/latam/live-tv/6320d80a66666000086712d7',  logo: '', category: 'Deportes', nowPlaying: 'Eventos Deportivos en Vivo' },
+  { id: 'man-13', numero: 13, name: 'TNT Series',     url: 'https://regionales.saohgdasregions.fun/stream.php?canal=tntseries&target=2', logo: '', category: 'Series', nowPlaying: 'Series 24/7',          needsWebView: true },
+  { id: 'man-14', numero: 14, name: 'Disney Channel', url: 'https://regionales.saohgdasregions.fun/stream.php?canal=disney&target=2',    logo: '', category: 'Series', nowPlaying: 'Disney 24/7',          needsWebView: true },
+  { id: 'man-15', numero: 15, name: 'TNT',            url: 'https://regionales.saohgdasregions.fun/stream.php?canal=tnt&target=2',       logo: '', category: 'Series', nowPlaying: 'TNT 24/7',             needsWebView: true },
+  { id: 'man-16', numero: 16, name: 'Warner Channel', url: 'https://regionales.saohgdasregions.fun/stream.php?canal=warner&target=2',    logo: '', category: 'Series', nowPlaying: 'Warner 24/7',          needsWebView: true },
+  { id: 'man-17', numero: 17, name: 'FX',             url: 'https://regionales.saohgdasregions.fun/stream.php?canal=fx&target=2',        logo: '', category: 'Series', nowPlaying: 'FX 24/7',              needsWebView: true },
+  { id: 'man-18', numero: 18, name: 'Comedy Central', url: 'https://regionales.saohgdasregions.fun/stream.php?canal=comedy&target=2',    logo: '', category: 'Series', nowPlaying: 'Comedy Central 24/7',  needsWebView: true },
+];
+
+/* ═══════════════════════════════════════════════════════════
+   HELPERS
+═══════════════════════════════════════════════════════════ */
+function esUrlManifiesto(valor: string): boolean {
+  return /(\.m3u8|\.mpd)(\?|#|$)/i.test(valor);
+}
+
+function extraerUrlManifiesto(texto: string): string | null {
+  const limpio = (texto || '').trim();
+  const match = limpio.match(/https?:\/\/[^\s"'<>]+?\.(?:m3u8|mpd)(?:\?[^\s"'<>]*)?/i);
+  return match ? match[0] : null;
+}
+
+function cacheBust(url: string): string {
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}_t=${Date.now()}`;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   REPRODUCTOR NATIVO REFORZADO
+═══════════════════════════════════════════════════════════ */
+const ReproductorNativo = memo(({ url, contentFit, onError, onStall }: {
+  url: string;
+  contentFit: 'contain' | 'fill';
+  onError?: () => void;
+  onStall?: () => void;
+}) => {
+  const [activeUrl, setActiveUrl] = useState(() => cacheBust(url));
+
+  const player = useVideoPlayer(activeUrl, p => {
+    p.loop = false;
+    try { (p as any).seekToLiveEdge?.(); } catch (_) {}
+    p.play();
+  });
+
+  const stallTimer   = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastPos      = useRef<number>(0);
+  const stallCount   = useRef<number>(0);
+  const replaceCount = useRef<number>(0);
+
+  const CHECK_INTERVAL   = 9000;
+  const MIN_DELTA        = 0.8;
+  const STALL_THRESHOLD  = 3;
+  const MAX_SELF_REPLACE = 3;
+
+  useEffect(() => {
+    setActiveUrl(cacheBust(url));
+    replaceCount.current = 0;
+    stallCount.current   = 0;
+    lastPos.current      = 0;
+  }, [url]);
+
+  useEffect(() => {
+    if (!player) return;
+    if (stallTimer.current) clearInterval(stallTimer.current);
+    stallTimer.current = setInterval(() => {
+      try {
+        const pos = player.currentTime ?? 0;
+        if (Math.abs(pos - lastPos.current) < MIN_DELTA) {
+          stallCount.current += 1;
+          if (stallCount.current >= STALL_THRESHOLD) {
+            stallCount.current = 0;
+            if (replaceCount.current < MAX_SELF_REPLACE) {
+              replaceCount.current += 1;
+              const fresh = cacheBust(url);
+              try {
+                player.replace(fresh);
+                setTimeout(() => {
+                  try { (player as any).seekToLiveEdge?.(); player.play(); } catch (_) {}
+                }, 500);
+              } catch (e) {
+                try { player.play(); } catch (_) {}
+              }
+            } else {
+              if (stallTimer.current) clearInterval(stallTimer.current);
+              onStall?.();
+              onError?.();
+            }
+          }
+        } else {
+          stallCount.current   = 0;
+          replaceCount.current = 0;
+        }
+        lastPos.current = pos;
+      } catch (_) {}
+    }, CHECK_INTERVAL);
+    return () => { if (stallTimer.current) clearInterval(stallTimer.current); };
+  }, [player, url]);
+
+  useEffect(() => {
+    if (!player) return;
+    const subStatus = player.addListener('statusChange', (payload: any) => {
+      const status = payload?.status ?? payload;
+      const error  = payload?.error  ?? null;
+      if (error) {
+        if (stallTimer.current) clearInterval(stallTimer.current);
+        onError?.();
+        return;
+      }
+      if (status === 'idle') {
+        try {
+          player.replace(cacheBust(url));
+          setTimeout(() => { try { player.play(); } catch (_) {} }, 400);
+        } catch (_) {}
+      }
+    });
+    const subPlaying = player.addListener('playingChange', (payload: any) => {
+      const isPlaying = payload?.isPlaying ?? payload;
+      if (!isPlaying) {
+        setTimeout(() => {
+          try { if (!player.playing) player.play(); } catch (_) {}
+        }, 6000);
+      }
+    });
+    return () => { subStatus.remove(); subPlaying.remove(); };
+  }, [player, url, onError]);
+
+  return (
+    <VideoView
+      style={StyleSheet.absoluteFill}
+      player={player}
+      contentFit={contentFit}
+      nativeControls={false}
+    />
+  );
+});
+
+/* ═══════════════════════════════════════════════════════════
+   JS INYECTADO EN WEBVIEW
+═══════════════════════════════════════════════════════════ */
+const TNT_INJECTION_BEFORE = `
+(function() {
+  if (window.__NEXUS_TNT__) return;
+  window.__NEXUS_TNT__ = true;
+  function post(url) {
+    try {
+      if (typeof url !== 'string' || url.length < 12) return;
+      if (!/(\.m3u8|\.mpd)(\\?|#|$)/i.test(url)) return;
+      window.ReactNativeWebView.postMessage('FOUND_MANIFEST:' + url);
+    } catch(e) {}
+  }
+  try {
+    var origOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url) {
+      try { post(url); } catch(e) {}
+      return origOpen.apply(this, arguments);
+    };
+  } catch(e) {}
+  try {
+    var origFetch = window.fetch;
+    if (origFetch) {
+      window.fetch = function(input, init) {
+        try { var u = typeof input === 'string' ? input : (input && input.url ? input.url : ''); post(u); } catch(e) {}
+        return origFetch.apply(this, arguments).then(function(r) {
+          try { if (r && r.url) post(r.url); } catch(e) {}
+          return r;
+        });
+      };
+    }
+  } catch(e) {}
+  try {
+    var observer = new MutationObserver(function(mutations) {
+      mutations.forEach(function(m) {
+        m.addedNodes.forEach(function(node) {
+          if (node.nodeName === 'VIDEO') { post(node.src || node.currentSrc || ''); node.addEventListener('loadedmetadata', function() { post(node.currentSrc || ''); }); }
+          if (node.nodeName === 'IFRAME') { window.ReactNativeWebView.postMessage('IFRAME_SRC:' + node.src); }
+          if (node.nodeName === 'SOURCE') { post(node.src || ''); }
+        });
+      });
+    });
+    observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
+  } catch(e) {}
+})(); true;
+`;
+
+const TNT_INJECTION_AFTER = `
+(function() {
+  function post(url) {
+    try {
+      if (typeof url !== 'string' || url.length < 12) return;
+      if (!/(\.m3u8|\.mpd)(\\?|#|$)/i.test(url)) return;
+      window.ReactNativeWebView.postMessage('FOUND_MANIFEST:' + url);
+    } catch(e) {}
+  }
+  function scanDOM() {
+    try {
+      var html = document.documentElement.innerHTML || '';
+      var matches = html.match(/https?:\\/\\/[^"'\\s<>]+\\.m3u8[^"'\\s<>]*/gi);
+      if (matches) matches.forEach(post);
+      Array.from(document.getElementsByTagName('video')).forEach(function(v) {
+        try { v.play(); } catch(e) {}
+        post(v.src || v.currentSrc || '');
+      });
+      var btns = document.querySelectorAll('.play-button,.vjs-big-play-button,.jw-icon-playback,#play,.play-btn,[data-action="play"]');
+      btns.forEach(function(b) { try { b.click(); } catch(e) {} });
+      Array.from(document.getElementsByTagName('source')).forEach(function(s) { post(s.getAttribute('src') || ''); });
+    } catch(e) {}
+  }
+  scanDOM();
+  var interval = setInterval(scanDOM, 2000);
+  setTimeout(function() {
+    clearInterval(interval);
+    window.ReactNativeWebView.postMessage('MANIFEST_TIMEOUT');
+  }, 24000);
+})(); true;
+`;
+
+/* ═══════════════════════════════════════════════════════════
+   SHIMMER PLACEHOLDER
+═══════════════════════════════════════════════════════════ */
+const ShimmerPlaceholder = ({ width, height, style }: { width: number; height: number; style?: any }) => {
+  const shimmerAnim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(shimmerAnim, { toValue: 1, duration: 1000, useNativeDriver: true }),
+      Animated.timing(shimmerAnim, { toValue: 0, duration: 1000, useNativeDriver: true }),
+    ]));
+    loop.start();
+    return () => loop.stop();
+  }, []);
+  const translateX = shimmerAnim.interpolate({ inputRange: [0, 1], outputRange: [-width, width] });
+  return (
+    <View style={[{ width, height, backgroundColor: T.color.surface, borderRadius: T.radius.md, overflow: 'hidden' }, style]}>
+      <Animated.View style={{ width: '100%', height: '100%', backgroundColor: 'rgba(255,255,255,0.06)', transform: [{ translateX }] }} />
+    </View>
+  );
+};
+
+/* ═══════════════════════════════════════════════════════════
+   FORMULARIO AGREGAR CONTENIDO
+═══════════════════════════════════════════════════════════ */
+const AddContentForm = ({ onAdd, onCancel, type }: {
+  onAdd: (item: MediaItem) => void;
+  onCancel: () => void;
+  type: 'movie' | 'tv';
+}) => {
+  const [title,     setTitle]     = useState('');
+  const [posterUrl, setPosterUrl] = useState('');
+  const [streamUrl, setStreamUrl] = useState('');
+  const [year,      setYear]      = useState('');
+  const [seasons,   setSeasons]   = useState('');
+
+  const handleAdd = () => {
+    if (!title.trim()) { Alert.alert('Error', 'El título es obligatorio.'); return; }
+    const newItem: MediaItem = {
+      id: Date.now().toString(),
+      title: title.trim(),
+      poster: posterUrl.trim() || 'https://via.placeholder.com/500x750.png?text=No+Image',
+      streamUrl: streamUrl.trim() || '',
+      year: year ? parseInt(year) : new Date().getFullYear(),
+      rating: '0.0',
+      seasons: type === 'tv' ? (seasons ? parseInt(seasons) : 1) : undefined,
+      type,
+      custom: true,
+    };
+    onAdd(newItem);
+    onCancel();
+  };
+
+  return (
+    <View style={styles.addFormContainer}>
+      <Text style={styles.addFormTitle}>Agregar {type === 'movie' ? 'Película' : 'Serie'}</Text>
+      <TextInput style={styles.addInput} placeholder="Título *"                        placeholderTextColor={T.color.textMuted} value={title}     onChangeText={setTitle} />
+      <TextInput style={styles.addInput} placeholder="URL del poster"                  placeholderTextColor={T.color.textMuted} value={posterUrl} onChangeText={setPosterUrl} />
+      <TextInput style={styles.addInput} placeholder="Link de reproducción (opcional)" placeholderTextColor={T.color.textMuted} value={streamUrl} onChangeText={setStreamUrl} />
+      <TextInput style={styles.addInput} placeholder="Año"                             placeholderTextColor={T.color.textMuted} value={year}      onChangeText={setYear} keyboardType="numeric" />
+      {type === 'tv' && (
+        <TextInput style={styles.addInput} placeholder="Temporadas" placeholderTextColor={T.color.textMuted} value={seasons} onChangeText={setSeasons} keyboardType="numeric" />
+      )}
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 }}>
+        <TouchableOpacity style={styles.addButton}    onPress={handleAdd}><Text style={{ color: '#fff', fontWeight: T.font.bold }}>Agregar</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.cancelButton} onPress={onCancel}><Text style={{ color: T.color.textSecondary }}>Cancelar</Text></TouchableOpacity>
+      </View>
+    </View>
+  );
+};
+
+/* ═══════════════════════════════════════════════════════════
+   MINI REPRODUCTOR
+═══════════════════════════════════════════════════════════ */
+const MiniPlayer = memo(({ ...props }: any) => {
+  const {
+    linkM3u8, contentFit, canalSeleccionado, vodItem,
+    onSwipeLeft, onSwipeRight, onToggleFullscreen, onChangeAspect,
+    onVolumeChange, onBrightnessChange, primaryColor,
+    onPlayerError, onPlayerStall, tntBuscando,
+  } = props;
+
+  const liveDot = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    const pulse = Animated.loop(Animated.sequence([
+      Animated.timing(liveDot, { toValue: 0.15, duration: 900, useNativeDriver: true }),
+      Animated.timing(liveDot, { toValue: 1,    duration: 900, useNativeDriver: true }),
+    ]));
+    pulse.start();
+    return () => pulse.stop();
+  }, []);
+
+  const lastTap = useRef<number | null>(null);
+  const panResponder = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onPanResponderRelease: (_, gestureState) => {
+      const { dx, dy, x0 } = gestureState;
+      const now = Date.now();
+      if (lastTap.current && now - lastTap.current < 300) {
+        onToggleFullscreen();
+        lastTap.current = null;
+        return;
+      }
+      lastTap.current = now;
+      if (Math.abs(dx) > Math.abs(dy)) {
+        if (Math.abs(dx) > 50) { if (dx > 0) onSwipeRight(); else onSwipeLeft(); }
+      } else {
+        if (Math.abs(dy) > 20) {
+          if (x0 < W / 2) onVolumeChange(dy > 0 ? -0.05 : 0.05);
+          else             onBrightnessChange(dy > 0 ? -0.05 : 0.05);
+        }
+      }
+    },
+  })).current;
+
+  const channelName = canalSeleccionado?.name ?? vodItem?.title ?? '';
+  const nowPlaying  = canalSeleccionado?.nowPlaying ?? '';
+
+  return (
+    <View style={styles.miniPlayerContainer} {...panResponder.panHandlers}>
+      {tntBuscando ? (
+        <View style={styles.miniPlayerPlaceholder}>
+          <ActivityIndicator size="large" color={T.color.primary} />
+          <Text style={[styles.miniPlayerText, { marginTop: 12 }]}>
+            Conectando a {canalSeleccionado?.name ?? 'canal'}…
+          </Text>
+          <Text style={{ color: T.color.textMuted, fontSize: T.font.xs, marginTop: 4 }}>Obteniendo señal en vivo</Text>
+        </View>
+      ) : linkM3u8 ? (
+        <ReproductorNativo url={linkM3u8} contentFit={contentFit} onError={onPlayerError} onStall={onPlayerStall} />
+      ) : (
+        <View style={styles.miniPlayerPlaceholder}>
+          <Ionicons name="tv-outline" size={IS_TV ? 72 : 50} color={T.color.textMuted} />
+          <Text style={styles.miniPlayerText}>Sin señal</Text>
+        </View>
+      )}
+
+      <TouchableOpacity style={styles.channelNavLeft}  onPress={onSwipeRight}>
+        <Ionicons name="chevron-back"    size={IS_TV ? 42 : 28} color="#fff" />
+      </TouchableOpacity>
+      <TouchableOpacity style={styles.channelNavRight} onPress={onSwipeLeft}>
+        <Ionicons name="chevron-forward" size={IS_TV ? 42 : 28} color="#fff" />
+      </TouchableOpacity>
+
+      <View style={styles.playerTopBar} pointerEvents="box-none">
+        {canalSeleccionado && (
+          <View style={styles.playerLivePill}>
+            <Animated.View style={[styles.playerLiveDot, { opacity: liveDot }]} />
+            <Text style={styles.playerLiveText}>EN VIVO</Text>
+          </View>
+        )}
+        <View style={{ flexDirection: 'row', gap: T.space.sm, marginLeft: 'auto' }}>
+          <TouchableOpacity style={styles.playerIconBtn} onPress={onChangeAspect}>
+            <Ionicons name="scan-outline"   size={IS_TV ? 28 : 18} color="#fff" />
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.playerIconBtn} onPress={onToggleFullscreen}>
+            <Ionicons name="expand-outline" size={IS_TV ? 28 : 18} color="#fff" />
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      <View style={styles.gradientOverlay} pointerEvents="none">
+        {vodItem ? (
+          <View style={styles.miniPlayerInfo}>
+            <Image source={{ uri: vodItem.poster }} style={styles.vodPosterSmall} />
+            <View style={{ flex: 1, marginLeft: T.space.sm }}>
+              <Text style={styles.miniPlayerName} numberOfLines={1}>{vodItem.title}</Text>
+              <Text style={styles.nowPlayingText}>{vodItem.year} {vodItem.type === 'tv' ? `· ${vodItem.seasons} temp.` : ''}</Text>
+            </View>
+          </View>
+        ) : canalSeleccionado && (
+          <View style={styles.miniPlayerInfo}>
+            <Text style={[styles.miniPlayerCh, { color: primaryColor }]}>{canalSeleccionado.numero}</Text>
+            <View style={{ flex: 1, marginLeft: T.space.sm }}>
+              <Text style={styles.miniPlayerName} numberOfLines={1}>{canalSeleccionado.name}</Text>
+              {canalSeleccionado.nowPlaying && (
+                <Text style={styles.nowPlayingText} numberOfLines={1}>{canalSeleccionado.nowPlaying}</Text>
+              )}
+            </View>
+          </View>
+        )}
+      </View>
+    </View>
+  );
+});
+
+/* ═══════════════════════════════════════════════════════════
+   MODAL DE DETALLE
+═══════════════════════════════════════════════════════════ */
+const DetailModal = ({ visible, item, onClose, primaryColor, onToggleWatchlist, isInWatchlist, onPlay }: any) => {
+  if (!item) return null;
+  return (
+    <Modal visible={visible} animationType="slide" transparent={false}>
+      <View style={styles.detailContainer}>
+        <StatusBar hidden />
+        <ScrollView contentContainerStyle={{ paddingBottom: 30 }}>
+          <Image source={{ uri: item.poster }} style={styles.detailPoster} resizeMode="cover" />
+          <TouchableOpacity style={styles.detailClose} onPress={onClose}>
+            <Ionicons name="close-circle" size={36} color="#fff" />
+          </TouchableOpacity>
+          <View style={styles.detailInfo}>
+            <Text style={styles.detailTitle}>{item.title}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: T.space.sm }}>
+              <Text style={[styles.detailRating, { color: primaryColor }]}>⭐ {item.rating}</Text>
+              <Text style={styles.detailYear}> | {item.year}</Text>
+              {item.seasons && <Text style={styles.detailYear}> | {item.seasons} temp.</Text>}
+            </View>
+            <Text style={styles.detailOverview}>{item.overview || 'Sin descripción disponible.'}</Text>
+            <View style={{ flexDirection: 'row', marginTop: T.space.lg }}>
+              {item.streamUrl ? (
+                <TouchableOpacity
+                  style={[styles.watchlistButton, { backgroundColor: primaryColor, flex: 1, marginRight: T.space.sm }]}
+                  onPress={() => onPlay(item)}
+                >
+                  <Text style={{ color: '#fff', fontWeight: T.font.bold }}>▶ Reproducir</Text>
+                </TouchableOpacity>
+              ) : null}
+              <TouchableOpacity
+                style={[styles.watchlistButton, { backgroundColor: isInWatchlist ? primaryColor : T.color.surfaceElevated, flex: item.streamUrl ? 1 : 2 }]}
+                onPress={() => onToggleWatchlist(item.id)}
+              >
+                <Text style={{ color: '#fff', fontWeight: T.font.bold }}>{isInWatchlist ? '✓ En mi lista' : '+ Mi lista'}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+};
+
+/* ═══════════════════════════════════════════════════════════
+   HOOK DE PERSISTENCIA
+═══════════════════════════════════════════════════════════ */
+const usePersistedState = (key: string, initialValue: any) => {
+  const [value, setValue] = useState(initialValue);
+  useEffect(() => {
+    (async () => {
+      const stored = await AsyncStorage.getItem(key);
+      if (stored) setValue(JSON.parse(stored));
+    })();
+  }, []);
+  const update = async (newValue: any) => {
+    setValue(newValue);
+    await AsyncStorage.setItem(key, JSON.stringify(newValue));
+  };
+  return [value, update] as const;
+};
+
+/* ═══════════════════════════════════════════════════════════
+   APP PRINCIPAL
+═══════════════════════════════════════════════════════════ */
+export default function App() {
+  const [mostrarSplash,   setMostrarSplash]   = useState(true);
+  const [activeTab,       setActiveTab]       = useState(0);
+  const [fullscreen,      setFullscreen]      = useState(false);
+
+  const [listaCanales,    setListaCanales]    = useState<Canal[]>([]);
+  const [canalSeleccionado, setCanalSeleccionado] = useState<Canal | null>(null);
+  const [linkM3u8,        setLinkM3u8]        = useState<string | null>(null);
+  const [cazando,         setCazando]         = useState(false);
+
+  const [tntNecesitaWebView, setTntNecesitaWebView] = useState(false);
+  const [tntBuscando,        setTntBuscando]        = useState(false);
+  const tntRetryCount = useRef(0);
+  const TNT_MAX_RETRY = 4;
+
+  const [categorias,      setCategorias]      = useState<string[]>(['Todos']);
+  const [categoriaActiva, setCategoriaActiva] = useState('Todos');
+  const [busqueda,        setBusqueda]        = useState('');
+  const [relacionAspecto, setRelacionAspecto] = useState<'Ajustar' | 'Estirar'>('Ajustar');
+  const [numeroMarcado,   setNumeroMarcado]   = useState('');
+  const [errorCanal,      setErrorCanal]      = useState(false);
+  const [loadingChannels, setLoadingChannels] = useState(true);
+  const [isBuffering,     setIsBuffering]     = useState(false);
+  const [refreshing,      setRefreshing]      = useState(false);
+  const [volume,          setVolume]          = useState(0.8);
+  const [brightness,      setBrightness]      = useState(0.7);
+  const [toastMsg,        setToastMsg]        = useState('');
+
+  const [accentColor,    setAccentColor]    = usePersistedState('accentColor', 'red');
+  const [favorites,      setFavorites]      = usePersistedState('favorites', []);
+  const [watchlist,      setWatchlist]      = usePersistedState('watchlist', []);
+  const [searchHistory,  setSearchHistory]  = usePersistedState('searchHistory', []);
+  const [lastChannel,    setLastChannel]    = usePersistedState('lastChannel', null);
+  const [appId,          setAppId]          = useState('');
+  const [recentChannels, setRecentChannels] = useState<Canal[]>([]);
+
+  const [movies,          setMovies]          = useState<MediaItem[]>(MOVIES_FALLBACK);
+  const [series,          setSeries]          = useState<MediaItem[]>(SERIES_FALLBACK);
+  const [loadingMovies,   setLoadingMovies]   = useState(true);
+  const [loadingSeries,   setLoadingSeries]   = useState(true);
+  const [moviePage,       setMoviePage]       = useState(1);
+  const [seriesPage,      setSeriesPage]      = useState(1);
+  const [movieCategory,   setMovieCategory]   = useState('popular');
+  const [seriesCategory,  setSeriesCategory]  = useState('popular');
+  const [customMovies,    setCustomMovies]    = usePersistedState('customMovies', []);
+  const [customSeries,    setCustomSeries]    = usePersistedState('customSeries', []);
+
+  const [vodItem,         setVodItem]         = useState<MediaItem | null>(null);
+  const [selectedMedia,   setSelectedMedia]   = useState<MediaItem | null>(null);
+  const [detailVisible,   setDetailVisible]   = useState(false);
+  const [showAddForm,     setShowAddForm]     = useState(false);
+  const [currentAddType,  setCurrentAddType]  = useState<'movie' | 'tv'>('movie');
+
+  const timerZapping   = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const timerCaza      = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const bufferingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inputRef       = useRef<TextInput>(null);
+  const canalSeleccionadoRef  = useRef<Canal | null>(null);
+  const cargaEnCurso   = useRef(false);
+  const webViewRef     = useRef<WebView>(null);
+  const tntWebViewRef  = useRef<WebView>(null);
+
+  const M3U_URL      = 'https://naphdev.online/list.m3u';
+  const primaryColor = ACCENT_COLORS[accentColor] || ACCENT_COLORS.red;
+
+  const toastAnim = useRef(new Animated.Value(0)).current;
+  const showToast = (msg: string) => {
+    setToastMsg(msg);
+    Animated.sequence([
+      Animated.timing(toastAnim, { toValue: 1, duration: 220, useNativeDriver: true }),
+      Animated.delay(2200),
+      Animated.timing(toastAnim, { toValue: 0, duration: 220, useNativeDriver: true }),
+    ]).start();
+  };
+
+  useEffect(() => { canalSeleccionadoRef.current = canalSeleccionado; }, [canalSeleccionado]);
+
+  /* ── SPLASH ─────────────────────────────────────────── */
+  const splashOpacity = useRef(new Animated.Value(0)).current;
+  const splashScale   = useRef(new Animated.Value(0.92)).current;
+  const ringRotate    = useRef(new Animated.Value(0)).current;
+  const glowPulse     = useRef(new Animated.Value(0.8)).current;
+  const progressAnim  = useRef(new Animated.Value(0)).current;
+  const particle1     = useRef(new Animated.Value(0)).current;
+  const particle2     = useRef(new Animated.Value(0)).current;
+  const particle3     = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    StatusBar.setBarStyle('light-content');
+    Animated.parallel([
+      Animated.timing(splashOpacity, { toValue: 1, duration: 700, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      Animated.timing(splashScale,   { toValue: 1, duration: 700, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+    ]).start();
+    const rotacion = Animated.loop(Animated.timing(ringRotate, { toValue: 1, duration: 4000, easing: Easing.linear, useNativeDriver: true }));
+    rotacion.start();
+    const glow = Animated.loop(Animated.sequence([
+      Animated.timing(glowPulse, { toValue: 1.1,  duration: 900, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      Animated.timing(glowPulse, { toValue: 0.85, duration: 900, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+    ]));
+    glow.start();
+    const p1 = Animated.loop(Animated.sequence([Animated.timing(particle1, { toValue: 1, duration: 3000, easing: Easing.linear, useNativeDriver: true }), Animated.timing(particle1, { toValue: 0, duration: 0, useNativeDriver: true })]));
+    const p2 = Animated.loop(Animated.sequence([Animated.timing(particle2, { toValue: 1, duration: 4000, easing: Easing.linear, useNativeDriver: true }), Animated.timing(particle2, { toValue: 0, duration: 0, useNativeDriver: true })]));
+    const p3 = Animated.loop(Animated.sequence([Animated.timing(particle3, { toValue: 1, duration: 4800, easing: Easing.linear, useNativeDriver: true }), Animated.timing(particle3, { toValue: 0, duration: 0, useNativeDriver: true })]));
+    p1.start(); p2.start(); p3.start();
+    Animated.timing(progressAnim, { toValue: 1, duration: 2000, easing: Easing.inOut(Easing.cubic), useNativeDriver: false }).start();
+    const t = setTimeout(() => {
+      Animated.parallel([
+        Animated.timing(splashOpacity, { toValue: 0, duration: 350, useNativeDriver: true }),
+        Animated.timing(splashScale,   { toValue: 1.03, duration: 350, useNativeDriver: true }),
+      ]).start(() => setMostrarSplash(false));
+    }, 2600);
+    return () => { clearTimeout(t); rotacion.stop(); glow.stop(); p1.stop(); p2.stop(); p3.stop(); };
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      let id = await AsyncStorage.getItem('appId');
+      if (!id) { id = 'NXTV-' + Math.random().toString(36).substr(2, 6).toUpperCase(); await AsyncStorage.setItem('appId', id); }
+      setAppId(id);
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (lastChannel && listaCanales.length > 0 && !canalSeleccionado) {
+      const canal = listaCanales.find(c => c.id === lastChannel.id);
+      if (canal) sintonizarCanalFijo(canal);
+    }
+  }, [listaCanales, lastChannel]);
+
+  /* ── CARGA M3U ───────────────────────────────────────── */
+  const cargarListaM3U = useCallback(async () => {
+    if (cargaEnCurso.current) return;
+    cargaEnCurso.current = true;
+    setLoadingChannels(true);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res  = await fetch(`${M3U_URL}?t=${Date.now()}`, { cache: 'no-store' });
+        const data = await res.text();
+        procesarListaM3U(data);
+        break;
+      } catch (e) {
+        if (attempt === 2) consolidarCanales([], new Set(['Todos']));
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
+    setLoadingChannels(false);
+    cargaEnCurso.current = false;
+  }, []);
+
+  useEffect(() => {
+    cargarListaM3U();
+    const intervalo = setInterval(cargarListaM3U, 30000);
+    return () => clearInterval(intervalo);
+  }, [cargarListaM3U]);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await cargarListaM3U();
+    setRefreshing(false);
+  }, [cargarListaM3U]);
+
+  const procesarListaM3U = (texto: string) => {
+    const lineas = texto.split('\n');
+    const canalesParseados: Canal[] = [];
+    const juegoCategorias: Set<string> = new Set(['Todos', 'Deportes']);
+    let infoTemporal = { name: '', logo: '', category: 'M3U Remotos' };
+    let contadorId = 3000;
+    let indexNumero = 20;
+    lineas.forEach(linea => {
+      const limpiada = linea.trim();
+      if (limpiada.startsWith('#EXTINF:')) {
+        const partesComa = limpiada.split(',');
+        const nombre     = partesComa[partesComa.length - 1].trim() || 'Canal M3U';
+        const matchLogo  = limpiada.match(/tvg-logo="([^"]+)"/i);
+        const logo       = matchLogo ? matchLogo[1] : '';
+        const matchGrupo = limpiada.match(/group-title="([^"]+)"/i);
+        const category   = matchGrupo ? matchGrupo[1] : 'General';
+        infoTemporal     = { name: nombre, logo, category };
+        juegoCategorias.add(category);
+      } else if (limpiada.startsWith('http://') || limpiada.startsWith('https://')) {
+        contadorId++;
+        canalesParseados.push({
+          id: String(contadorId), numero: indexNumero++,
+          name: infoTemporal.name || 'Canal Remoto',
+          logo: infoTemporal.logo, category: infoTemporal.category, url: limpiada,
+        });
+        infoTemporal = { name: '', logo: '', category: 'M3U Remotos' };
+      }
+    });
+    consolidarCanales(canalesParseados, juegoCategorias);
+  };
+
+  const consolidarCanales = (remotos: Canal[], mapaCategorias: Set<string>) => {
+    const mezclaCompleta = [...CANALES_MANUALES, ...remotos];
+    const actual = canalSeleccionadoRef.current;
+    setListaCanales(mezclaCompleta);
+    const cats = Array.from(mapaCategorias);
+    if (favorites.length > 0) cats.push('Favoritos');
+    setCategorias(cats);
+    if (actual) {
+      const coincidencia = mezclaCompleta.find(c => c.id === actual.id || (c.name === actual.name && c.category === actual.category));
+      if (coincidencia && coincidencia.url !== actual.url) sintonizarCanalFijo(coincidencia);
+      return;
+    }
+    if (!actual && mezclaCompleta.length > 0 && !lastChannel) sintonizarCanalFijo(mezclaCompleta[0]);
+  };
+
+  const limpiarCaza = () => {
+    if (timerCaza.current) { clearTimeout(timerCaza.current); timerCaza.current = null; }
+  };
+
+  const obtenerStreamTNT = async (canalUrl: string): Promise<string | null> => {
+    const slugMatch = canalUrl.match(/[?&]canal=([^&]+)/i);
+    const slug      = slugMatch ? slugMatch[1] : '';
+    const base      = 'https://regionales.saohgdasregions.fun';
+    const embedBase = 'https://embed.saohgdasregions.fun';
+
+    const intentos: { url: string; referer: string }[] = [
+      { url: canalUrl,                                         referer: `${embedBase}/embed2/${slug}.html` },
+      { url: `${embedBase}/embed2/${slug}.html`,               referer: embedBase + '/' },
+      { url: `${base}/stream.php?canal=${slug}`,               referer: `${embedBase}/embed2/${slug}.html` },
+      { url: `${base}/stream.php?canal=${slug}&target=1`,      referer: `${embedBase}/embed2/${slug}.html` },
+    ];
+
+    const UA     = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36';
+    const ORIGIN = embedBase;
+
+    for (const { url, referer } of intentos) {
+      try {
+        const res  = await fetch(url, {
+          headers: {
+            'User-Agent':      UA,
+            'Referer':         referer,
+            'Origin':          ORIGIN,
+            'Accept':          'text/html,application/xhtml+xml,*/*;q=0.8',
+            'Accept-Language': 'es-AR,es;q=0.9',
+          },
+        });
+        const html = await res.text();
+        const matchM3u8 = html.match(/https?:\/\/[^\s"'<>]+?\.m3u8(?:\?[^\s"'<>]*)?/i);
+        if (matchM3u8) return matchM3u8[0];
+        const matchSrc = html.match(/(?:src|file|source|hls)['":\s=]+["'](https?:\/\/[^"']+\.m3u8[^"']*)/i);
+        if (matchSrc)  return matchSrc[1];
+        const matchIframe = html.match(/src=["'](https?:\/\/(?:regionales|embed)\.saohgdasregions\.fun[^"']+)/i);
+        if (matchIframe) {
+          try {
+            const res2  = await fetch(matchIframe[1], { headers: { 'User-Agent': UA, 'Referer': url, 'Origin': ORIGIN } });
+            const html2 = await res2.text();
+            const m2    = html2.match(/https?:\/\/[^\s"'<>]+?\.m3u8(?:\?[^\s"'<>]*)?/i);
+            if (m2) return m2[0];
+          } catch (_) {}
+        }
+      } catch (_) {}
+    }
+    return null;
+  };
+
+  const sintonizarCanalFijo = async (canal: Canal) => {
+    limpiarCaza();
+    setLinkM3u8(null);
+    setCanalSeleccionado(canal);
+    setVodItem(null);
+    setTntNecesitaWebView(false);
+    setTntBuscando(false);
+    setLastChannel({ id: canal.id, name: canal.name, numero: canal.numero });
+    setRecentChannels(prev => [canal, ...prev.filter(c => c.id !== canal.id)].slice(0, 10));
+    setIsBuffering(true);
+    if (bufferingTimer.current) clearTimeout(bufferingTimer.current);
+    bufferingTimer.current = setTimeout(() => setIsBuffering(false), 1200);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+
+    if (esUrlManifiesto(canal.url)) {
+      setLinkM3u8(canal.url);
+      setCazando(false);
+      return;
+    }
+
+    if (canal.needsWebView) {
+      tntRetryCount.current = 0;
+      setTntBuscando(true);
+      setCazando(false);
+      const streamUrl = await obtenerStreamTNT(canal.url);
+      if (streamUrl) {
+        setLinkM3u8(streamUrl);
+        setTntBuscando(false);
+      } else {
+        setTntNecesitaWebView(true);
+        timerCaza.current = setTimeout(() => {
+          setTntBuscando(false);
+          setTntNecesitaWebView(false);
+          limpiarCaza();
+          Alert.alert(canal.name, 'No se pudo extraer el stream. El canal puede estar offline.', [{ text: 'OK' }]);
+        }, 26000);
+      }
+      return;
+    }
+
+    setCazando(true);
+    timerCaza.current = setTimeout(() => setCazando(false), 15000);
+  };
+
+  const reextraerTNT = useCallback(async () => {
+    if (tntRetryCount.current >= TNT_MAX_RETRY) {
+      setLinkM3u8(null);
+      setTntBuscando(false);
+      setTntNecesitaWebView(false);
+      return;
+    }
+    tntRetryCount.current += 1;
+    setLinkM3u8(null);
+    setTntBuscando(true);
+    setTntNecesitaWebView(false);
+    await new Promise(r => setTimeout(r, 1500));
+    const streamUrl = await obtenerStreamTNT(canalSeleccionadoRef.current?.url ?? '');
+    if (streamUrl) {
+      setLinkM3u8(streamUrl);
+      setTntBuscando(false);
+    } else {
+      setTntNecesitaWebView(true);
+      timerCaza.current = setTimeout(() => {
+        setTntBuscando(false);
+        setTntNecesitaWebView(false);
+        limpiarCaza();
+      }, 26000);
+    }
+  }, []);
+
+  const alRecibirMensajeWeb = (event: WebViewMessageEvent) => {
+    const data       = String(event.nativeEvent.data || '').trim();
+    const encontrada = extraerUrlManifiesto(data);
+    if (encontrada) { setLinkM3u8(encontrada); setCazando(false); limpiarCaza(); }
+  };
+
+  const alRecibirMensajeTNT = (event: WebViewMessageEvent) => {
+    const data = String(event.nativeEvent.data || '').trim();
+    if (data.startsWith('FOUND_MANIFEST:')) {
+      const url = data.replace('FOUND_MANIFEST:', '');
+      setLinkM3u8(url);
+      setTntBuscando(false);
+      setTntNecesitaWebView(false);
+      limpiarCaza();
+      return;
+    }
+    if (esUrlManifiesto(data)) {
+      setLinkM3u8(data);
+      setTntBuscando(false);
+      setTntNecesitaWebView(false);
+      limpiarCaza();
+      return;
+    }
+    if (data.startsWith('IFRAME_SRC:')) {
+      const iframeSrc = data.replace('IFRAME_SRC:', '');
+      if (iframeSrc && iframeSrc.startsWith('http')) {
+        tntWebViewRef.current?.injectJavaScript(`
+          (function() {
+            try {
+              var iframes = document.getElementsByTagName('iframe');
+              for (var i = 0; i < iframes.length; i++) {
+                try {
+                  var doc = iframes[i].contentDocument || (iframes[i].contentWindow && iframes[i].contentWindow.document);
+                  if (doc) {
+                    var html = doc.documentElement.innerHTML || '';
+                    var matches = html.match(/https?:\\/\\/[^"'\\s<>]+\\.m3u8[^"'\\s<>]*/gi);
+                    if (matches) matches.forEach(function(u) { window.ReactNativeWebView.postMessage('FOUND_MANIFEST:' + u); });
+                  }
+                } catch(e) {}
+              }
+            } catch(e) {}
+          })(); true;
+        `);
+      }
+      return;
+    }
+    if (data === 'MANIFEST_TIMEOUT') {
+      setTntBuscando(false);
+      setTntNecesitaWebView(false);
+      limpiarCaza();
+      Alert.alert('Canal', 'No se pudo extraer el stream. El canal puede estar offline.');
+    }
+  };
+
+  const canalSiguiente = () => {
+    if (!canalSeleccionado || listaCanales.length === 0) return;
+    const idx = listaCanales.findIndex(c => c.id === canalSeleccionado.id);
+    sintonizarCanalFijo(listaCanales[(idx + 1) % listaCanales.length]);
+  };
+
+  const canalAnterior = () => {
+    if (!canalSeleccionado || listaCanales.length === 0) return;
+    const idx = listaCanales.findIndex(c => c.id === canalSeleccionado.id);
+    sintonizarCanalFijo(listaCanales[idx === 0 ? listaCanales.length - 1 : idx - 1]);
+  };
+
+  const contentFit: 'contain' | 'fill' = relacionAspecto === 'Ajustar' ? 'contain' : 'fill';
+
+  const canalesFiltrados = listaCanales.filter(c => {
+    if (categoriaActiva === 'Favoritos') return favorites.includes(c.id) && c.name.toLowerCase().includes(busqueda.toLowerCase());
+    return (categoriaActiva === 'Todos' || c.category === categoriaActiva) && c.name.toLowerCase().includes(busqueda.toLowerCase());
+  });
+
+  const applySearch = (text: string) => {
+    setBusqueda(text);
+    if (text && !searchHistory.includes(text)) setSearchHistory([text, ...searchHistory].slice(0, 5));
+  };
+
+  const tabOpacity = useRef(new Animated.Value(1)).current;
+  const changeTab  = (index: number) => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    Animated.timing(tabOpacity, { toValue: 0, duration: 100, useNativeDriver: true }).start(() => {
+      setActiveTab(index);
+      Animated.timing(tabOpacity, { toValue: 1, duration: 100, useNativeDriver: true }).start();
+    });
+  };
+
+  useEffect(() => {
+    const intervaloFoco = setInterval(() => {
+      if (inputRef.current && !mostrarSplash && !fullscreen) inputRef.current.focus();
+    }, 2000);
+    return () => clearInterval(intervaloFoco);
+  }, [mostrarSplash, fullscreen]);
+
+  const alEscribirControlRemoto = (texto: string) => {
+    const limpio = texto.replace(/[^0-9]/g, '');
+    if (!limpio) return;
+    setNumeroMarcado(limpio);
+    if (timerZapping.current) clearTimeout(timerZapping.current);
+    timerZapping.current = setTimeout(() => {
+      const encontrado = listaCanales.find(c => c.numero === parseInt(limpio, 10));
+      if (encontrado) sintonizarCanalFijo(encontrado);
+      else { setErrorCanal(true); setTimeout(() => setErrorCanal(false), 2000); }
+      setNumeroMarcado('');
+    }, 1400);
+  };
+
+  /* ── TMDB ────────────────────────────────────────────── */
+  const fetchMoviesByCategory = useCallback(async (category: string, page: number = 1) => {
+    setLoadingMovies(true);
+    let endpoint = '';
+    switch (category) {
+      case 'popular':   endpoint = `https://api.themoviedb.org/3/movie/popular?api_key=${TMDB_API_KEY}&language=es&page=${page}`; break;
+      case 'top_rated': endpoint = `https://api.themoviedb.org/3/movie/top_rated?api_key=${TMDB_API_KEY}&language=es&page=${page}`; break;
+      case 'upcoming':  endpoint = `https://api.themoviedb.org/3/movie/upcoming?api_key=${TMDB_API_KEY}&language=es&page=${page}`; break;
+      default: setLoadingMovies(false); return;
+    }
+    try {
+      const res  = await fetch(endpoint);
+      const data = await res.json();
+      if (data.results) {
+        const formatted: MediaItem[] = data.results.map((m: any) => ({
+          id: m.id.toString(), title: m.title,
+          poster:   `https://image.tmdb.org/t/p/w500${m.poster_path}`,
+          backdrop: `https://image.tmdb.org/t/p/w780${m.backdrop_path}`,
+          year:   new Date(m.release_date).getFullYear(),
+          rating: m.vote_average.toFixed(1), overview: m.overview, type: 'movie',
+        }));
+        if (page === 1) setMovies(formatted); else setMovies(prev => [...prev, ...formatted]);
+      } else { if (page === 1) setMovies(MOVIES_FALLBACK); }
+    } catch { if (page === 1) setMovies(MOVIES_FALLBACK); }
+    finally   { setLoadingMovies(false); }
+  }, []);
+
+  const fetchSeriesByCategory = useCallback(async (category: string, page: number = 1) => {
+    setLoadingSeries(true);
+    let endpoint = '';
+    switch (category) {
+      case 'popular':    endpoint = `https://api.themoviedb.org/3/tv/popular?api_key=${TMDB_API_KEY}&language=es&page=${page}`; break;
+      case 'top_rated':  endpoint = `https://api.themoviedb.org/3/tv/top_rated?api_key=${TMDB_API_KEY}&language=es&page=${page}`; break;
+      case 'on_the_air': endpoint = `https://api.themoviedb.org/3/tv/on_the_air?api_key=${TMDB_API_KEY}&language=es&page=${page}`; break;
+      default: setLoadingSeries(false); return;
+    }
+    try {
+      const res  = await fetch(endpoint);
+      const data = await res.json();
+      if (data.results) {
+        const formatted: MediaItem[] = data.results.map((s: any) => ({
+          id: s.id.toString(), title: s.name,
+          poster:   `https://image.tmdb.org/t/p/w500${s.poster_path}`,
+          backdrop: `https://image.tmdb.org/t/p/w780${s.backdrop_path}`,
+          year:    new Date(s.first_air_date).getFullYear(),
+          rating:  s.vote_average.toFixed(1),
+          seasons: s.number_of_seasons, overview: s.overview, type: 'tv',
+        }));
+        if (page === 1) setSeries(formatted); else setSeries(prev => [...prev, ...formatted]);
+      } else { if (page === 1) setSeries(SERIES_FALLBACK); }
+    } catch { if (page === 1) setSeries(SERIES_FALLBACK); }
+    finally   { setLoadingSeries(false); }
+  }, []);
+
+  useEffect(() => {
+    fetchMoviesByCategory(movieCategory, 1);
+    fetchSeriesByCategory(seriesCategory, 1);
+  }, [movieCategory, seriesCategory]);
+
+  const handleAddCustomMovie  = (item: MediaItem) => { setCustomMovies((prev: MediaItem[]) => [item, ...prev]); };
+  const handleAddCustomSeries = (item: MediaItem) => { setCustomSeries((prev: MediaItem[]) => [item, ...prev]); };
+  const openAddForm = (type: 'movie' | 'tv') => { setCurrentAddType(type); setShowAddForm(true); };
+
+  const playVod = (item: MediaItem) => {
+    if (!item.streamUrl) return;
+    setLinkM3u8(item.streamUrl);
+    setCanalSeleccionado(null);
+    setVodItem(item);
+    setCazando(false);
+    closeDetail();
+    setFullscreen(false);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+  };
+
+  const openDetail  = (item: MediaItem) => { setSelectedMedia(item); setDetailVisible(true); };
+  const closeDetail = () => setDetailVisible(false);
+
+  const toggleWatchlist = (id: string) => {
+    setWatchlist((prev: string[]) => prev.includes(id) ? prev.filter((wid: string) => wid !== id) : [...prev, id]);
+  };
+
+  const loadMoreMovies = () => {
+    if (movieCategory !== 'custom') { const next = moviePage + 1; setMoviePage(next); fetchMoviesByCategory(movieCategory, next); }
+  };
+  const loadMoreSeries = () => {
+    if (seriesCategory !== 'custom') { const next = seriesPage + 1; setSeriesPage(next); fetchSeriesByCategory(seriesCategory, next); }
+  };
+
+  const handlePlayerError = useCallback(() => {
+    if (canalSeleccionado && !vodItem) {
+      if (canalSeleccionado.needsWebView) { reextraerTNT(); return; }
+      setLinkM3u8(null);
+      limpiarCaza();
+      setTimeout(() => { if (canalSeleccionadoRef.current) sintonizarCanalFijo(canalSeleccionadoRef.current); }, 500);
+    }
+  }, [canalSeleccionado, vodItem]);
+
+  const handlePlayerStall = useCallback(() => {
+    if (canalSeleccionado?.needsWebView) reextraerTNT();
+  }, [canalSeleccionado]);
+
+  const injectPlayScript = () => {
+    webViewRef.current?.injectJavaScript(`
+      (function() {
+        window.ReactNativeWebView.postMessage('PAGE_LOADED');
+        var playButtons = document.querySelectorAll('button[aria-label="Play"], button[title="Play"], .play-button, .vjs-big-play-button, [data-action="play"], .play-btn');
+        for (var i = 0; i < playButtons.length; i++) { playButtons[i].click(); }
+        var videos = document.getElementsByTagName('video');
+        for (var j = 0; j < videos.length; j++) { videos[j].play(); }
+      })(); true;
+    `);
+  };
+
+  /* ═══════════════════════════════════════════════════════
+     SPLASH RENDER
+  ═══════════════════════════════════════════════════════ */
+  if (mostrarSplash) {
+    const spin         = ringRotate.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
+    const progressWidth = progressAnim.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] });
+    const p1x = particle1.interpolate({ inputRange: [0, 1], outputRange: [-60, 260] });
+    const p1y = particle1.interpolate({ inputRange: [0, 1], outputRange: [100, 20] });
+    const p2x = particle2.interpolate({ inputRange: [0, 1], outputRange: [280, -40] });
+    const p2y = particle2.interpolate({ inputRange: [0, 1], outputRange: [180, 60] });
+    const p3x = particle3.interpolate({ inputRange: [0, 1], outputRange: [40, 320] });
+    const p3y = particle3.interpolate({ inputRange: [0, 1], outputRange: [30, 220] });
+    return (
+      <View style={sp.root}>
+        <StatusBar hidden />
+        <View style={sp.bgOrb1} /><View style={sp.bgOrb2} /><View style={sp.bgOrb3} />
+        <Animated.View style={[sp.particle,       { transform: [{ translateX: p1x }, { translateY: p1y }] }]} />
+        <Animated.View style={[sp.particleSmall,  { transform: [{ translateX: p2x }, { translateY: p2y }] }]} />
+        <Animated.View style={[sp.particleSmall2, { transform: [{ translateX: p3x }, { translateY: p3y }] }]} />
+        <Animated.View style={[sp.centerWrap, { opacity: splashOpacity, transform: [{ scale: splashScale }] }]}>
+          <Animated.View style={[sp.logoGlow, { transform: [{ scale: glowPulse }] }]} />
+          <Animated.View style={[sp.logoOuterRing, { transform: [{ rotate: spin }] }]}>
+            <View style={sp.ringAccentTop} />
+            <View style={sp.ringAccentBottom} />
+            <View style={sp.ringAccentLeft} />
+            <View style={sp.ringAccentRight} />
+          </Animated.View>
+          <View style={sp.logoCore}>
+            <View style={sp.logoInnerFrame}>
+              <View style={sp.logoNWrap}>
+                <View style={sp.logoNBarLeft} />
+                <View style={sp.logoNBarRight} />
+                <View style={sp.logoNDiag} />
+              </View>
+            </View>
+          </View>
+          <Text style={sp.title}>NEXUS<Text style={sp.titleAccent}>TV</Text></Text>
+          <Text style={sp.sub}>STREAMING PREMIUM</Text>
+          <View style={sp.progressTrack}>
+            <Animated.View style={[sp.progressFill, { width: progressWidth }]} />
+          </View>
+          <Text style={sp.loadingText}>SINTONIZANDO CANALES</Text>
+        </Animated.View>
+        <View style={sp.bottomBar} />
+      </View>
+    );
+  }
+
+  /* ═══════════════════════════════════════════════════════
+     FULLSCREEN
+  ═══════════════════════════════════════════════════════ */
+  if (fullscreen) {
+    return (
+      <View style={styles.fullscreenContainer}>
+        <StatusBar hidden />
+        {linkM3u8
+          ? <ReproductorNativo url={linkM3u8} contentFit={contentFit} onError={handlePlayerError} onStall={handlePlayerStall} />
+          : <View style={styles.miniPlayerPlaceholder}>
+              <Ionicons name="tv-outline" size={50} color={T.color.textMuted} />
+              <Text style={styles.miniPlayerText}>Sin señal</Text>
+            </View>
+        }
+        <TouchableOpacity style={styles.fullscreenExit} onPress={() => setFullscreen(false)}>
+          <Ionicons name="close" size={IS_TV ? 40 : 28} color="#fff" />
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  /* ═══════════════════════════════════════════════════════
+     MAIN RENDER
+  ═══════════════════════════════════════════════════════ */
+  return (
+    <View style={styles.container}>
+      <StatusBar barStyle="light-content" backgroundColor={T.color.bg} />
+
+      <TextInput
+        ref={inputRef}
+        value={numeroMarcado}
+        onChangeText={alEscribirControlRemoto}
+        keyboardType="numeric"
+        showSoftInputOnFocus={false}
+        style={styles.inputOculto}
+      />
+
+      {/* Header */}
+      <View style={styles.header}>
+        <Text style={styles.headerLogo}>
+          NEXUS<Text style={styles.headerLogoAccent}>TV</Text>
+        </Text>
+        <View style={styles.headerActions}>
+          <TouchableOpacity style={styles.headerIconBtn} onPress={() => showToast('Notificaciones — próximamente')}>
+            <Ionicons name="notifications-outline" size={IS_TV ? 28 : 20} color={T.color.textSecondary} />
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.headerIconBtn}>
+            <View style={styles.profileAvatar}>
+              <Text style={styles.profileAvatarText}>U</Text>
+            </View>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Mini Player */}
+      <MiniPlayer
+        linkM3u8={linkM3u8}
+        contentFit={contentFit}
+        canalSeleccionado={canalSeleccionado}
+        vodItem={vodItem}
+        onSwipeLeft={canalSiguiente}
+        onSwipeRight={canalAnterior}
+        onToggleFullscreen={() => setFullscreen(true)}
+        onChangeAspect={() => setRelacionAspecto(prev => prev === 'Ajustar' ? 'Estirar' : 'Ajustar')}
+        onVolumeChange={(delta: number) => setVolume(prev => Math.min(1, Math.max(0, prev + delta)))}
+        onBrightnessChange={(delta: number) => setBrightness(prev => Math.min(1, Math.max(0, prev + delta)))}
+        primaryColor={primaryColor}
+        onPlayerError={handlePlayerError}
+        onPlayerStall={handlePlayerStall}
+        tntBuscando={tntBuscando}
+      />
+
+      {(volume !== 0.8 || brightness !== 0.7) && (
+        <View style={styles.volumeBrightnessFeedback}>
+          <Text style={styles.feedbackText}>🔊 Vol: {Math.round(volume * 100)}%</Text>
+          <Text style={styles.feedbackText}>☀️ Brillo: {Math.round(brightness * 100)}%</Text>
+        </View>
+      )}
+
+      {isBuffering && (
+        <View style={styles.bufferingOverlay}>
+          <ActivityIndicator size="large" color={primaryColor} />
+        </View>
+      )}
+
+      <Animated.View style={[styles.tabContent, { opacity: tabOpacity }]}>
+
+        {/* ══════════ TV ══════════ */}
+        {activeTab === 0 && (
+          <View style={styles.tvTab}>
+            <TextInput
+              style={styles.searchInputField}
+              placeholder="🔍 Buscar canal..."
+              placeholderTextColor={T.color.textMuted}
+              value={busqueda}
+              onChangeText={applySearch}
+            />
+            {searchHistory.length > 0 && busqueda === '' && (
+              <ScrollView horizontal style={styles.searchHistoryRow} showsHorizontalScrollIndicator={false}>
+                {searchHistory.map((term: string, idx: number) => (
+                  <TouchableOpacity key={idx} style={styles.searchHistoryChip} onPress={() => setBusqueda(term)}>
+                    <Text style={styles.searchHistoryText}>{term}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
+            {recentChannels.length > 0 && (
+              <ScrollView horizontal style={styles.recentRow} showsHorizontalScrollIndicator={false}>
+                {recentChannels.map(ch => (
+                  <TouchableOpacity key={`rec-${ch.id}`} style={[styles.recentChip, { backgroundColor: primaryColor }]} onPress={() => sintonizarCanalFijo(ch)}>
+                    <Text style={styles.recentChipText}>{ch.numero} {ch.name}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.catScroll}>
+              {categorias.map(cat => (
+                <TouchableOpacity
+                  key={cat}
+                  style={[styles.categoryChip, categoriaActiva === cat && styles.categoryChipActive]}
+                  onPress={() => { setCategoriaActiva(cat); Haptics.selectionAsync(); }}
+                >
+                  <Text style={[styles.categoryChipText, categoriaActiva === cat && styles.categoryChipTextActive]}>{cat}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            {loadingChannels ? (
+              <View style={{ gap: T.space.sm }}>
+                {Array.from({ length: 8 }).map((_, i) => (
+                  <View key={`skel-${i}`} style={styles.skeletonRow}>
+                    <ShimmerPlaceholder width={s(40)} height={s(30)} style={{ marginRight: T.space.md }} />
+                    <ShimmerPlaceholder width={s(160)} height={s(14)} />
+                  </View>
+                ))}
+              </View>
+            ) : (
+              <FlatList
+                data={canalesFiltrados}
+                keyExtractor={item => item.id}
+                getItemLayout={(_, index) => ({ length: s(76), offset: s(76) * index, index })}
+                contentContainerStyle={{ paddingBottom: 24 }}
+                refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={primaryColor} />}
+                renderItem={({ item }) => {
+                  const isActive = canalSeleccionado?.id === item.id;
+                  const isFav    = favorites.includes(item.id);
+                  return (
+                    <TouchableOpacity
+                      style={[styles.channelRow, isActive && styles.channelRowActive, isActive && { borderColor: primaryColor }]}
+                      onPress={() => sintonizarCanalFijo(item)}
+                      activeOpacity={0.75}
+                    >
+                      <View style={[styles.channelNumberBadge, { backgroundColor: isActive ? primaryColor : T.color.surfaceElevated }]}>
+                        <Text style={[styles.channelNumberText, { color: isActive ? '#fff' : T.color.textSecondary }]}>{item.numero}</Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.channelName, isActive && styles.channelNameActive]} numberOfLines={1}>{item.name}</Text>
+                        {item.nowPlaying && <Text style={styles.channelNowPlaying} numberOfLines={1}>▶ {item.nowPlaying}</Text>}
+                      </View>
+                      <TouchableOpacity
+                        onPress={() => setFavorites(isFav ? favorites.filter((id: string) => id !== item.id) : [...favorites, item.id])}
+                        style={{ padding: T.space.sm }}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      >
+                        <Ionicons name={isFav ? 'star' : 'star-outline'} size={IS_TV ? 26 : 18} color={isFav ? T.color.gold : T.color.textMuted} />
+                      </TouchableOpacity>
+                      {item.logo
+                        ? <Image source={{ uri: item.logo }} style={styles.channelLogoSmall} />
+                        : <View style={styles.logoPlaceholderSmall}><Ionicons name="tv" size={16} color={T.color.textMuted} /></View>
+                      }
+                    </TouchableOpacity>
+                  );
+                }}
+              />
+            )}
+          </View>
+        )}
+
+        {/* ══════════ PELÍCULAS ══════════ */}
+        {activeTab === 1 && (
+          <View style={styles.pageContainer}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.categoryMenu} contentContainerStyle={{ paddingHorizontal: T.space.lg }}>
+              {['popular', 'top_rated', 'upcoming', 'custom'].map(cat => (
+                <TouchableOpacity
+                  key={cat}
+                  style={[styles.categoryChip, movieCategory === cat && styles.categoryChipActive]}
+                  onPress={() => { setMovieCategory(cat); setMoviePage(1); }}
+                >
+                  <Text style={[styles.categoryChipText, movieCategory === cat && styles.categoryChipTextActive]}>
+                    {cat === 'popular' ? 'Populares' : cat === 'top_rated' ? 'Mejor valoradas' : cat === 'upcoming' ? 'Próximamente' : 'Mi contenido'}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+              <TouchableOpacity style={[styles.addChip, { backgroundColor: primaryColor }]} onPress={() => openAddForm('movie')}>
+                <Ionicons name="add" size={IS_TV ? 28 : 20} color="#fff" />
+              </TouchableOpacity>
+            </ScrollView>
+            {movieCategory === 'custom' ? (
+              <FlatList
+                data={customMovies}
+                keyExtractor={(item: MediaItem) => item.id}
+                numColumns={MEDIA_COLS}
+                contentContainerStyle={{ paddingHorizontal: T.space.lg, paddingBottom: 24, paddingTop: T.space.sm }}
+                columnWrapperStyle={MEDIA_COLS > 1 ? { gap: T.space.md, marginBottom: T.space.md } : undefined}
+                renderItem={({ item }: { item: MediaItem }) => (
+                  <TouchableOpacity style={styles.mediaCard} onPress={() => openDetail(item)} activeOpacity={0.85}>
+                    <Image source={{ uri: item.poster }} style={styles.mediaPoster} resizeMode="cover" />
+                    <View style={styles.mediaInfo}>
+                      <Text style={styles.mediaTitle} numberOfLines={2}>{item.title}</Text>
+                      <Text style={styles.mediaMeta}>{item.year}</Text>
+                    </View>
+                  </TouchableOpacity>
+                )}
+              />
+            ) : (
+              <FlatList
+                data={movies}
+                keyExtractor={item => item.id}
+                numColumns={MEDIA_COLS}
+                contentContainerStyle={{ paddingHorizontal: T.space.lg, paddingBottom: 24, paddingTop: T.space.sm }}
+                columnWrapperStyle={MEDIA_COLS > 1 ? { gap: T.space.md, marginBottom: T.space.md } : undefined}
+                onEndReached={loadMoreMovies}
+                onEndReachedThreshold={0.5}
+                renderItem={({ item }) => (
+                  <TouchableOpacity style={styles.mediaCard} onPress={() => openDetail(item)} activeOpacity={0.85}>
+                    <Image source={{ uri: item.poster }} style={styles.mediaPoster} resizeMode="cover" />
+                    <View style={styles.mediaCardOverlay} />
+                    <View style={styles.mediaInfo}>
+                      <Text style={styles.mediaTitle} numberOfLines={2}>{item.title}</Text>
+                      <View style={[styles.ratingBadge, { backgroundColor: primaryColor + '25' }]}>
+                        <Text style={[styles.ratingText, { color: primaryColor }]}>⭐ {item.rating}</Text>
+                      </View>
+                    </View>
+                    {item.custom && (
+                      <View style={styles.mediaCardBadge}><Text style={styles.mediaCardBadgeText}>TUYA</Text></View>
+                    )}
+                  </TouchableOpacity>
+                )}
+              />
+            )}
+          </View>
+        )}
+
+        {/* ══════════ SERIES ══════════ */}
+        {activeTab === 2 && (
+          <View style={styles.pageContainer}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.categoryMenu} contentContainerStyle={{ paddingHorizontal: T.space.lg }}>
+              {['popular', 'top_rated', 'on_the_air', 'custom'].map(cat => (
+                <TouchableOpacity
+                  key={cat}
+                  style={[styles.categoryChip, seriesCategory === cat && styles.categoryChipActive]}
+                  onPress={() => { setSeriesCategory(cat); setSeriesPage(1); }}
+                >
+                  <Text style={[styles.categoryChipText, seriesCategory === cat && styles.categoryChipTextActive]}>
+                    {cat === 'popular' ? 'Populares' : cat === 'top_rated' ? 'Mejor valoradas' : cat === 'on_the_air' ? 'Al aire' : 'Mi contenido'}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+              <TouchableOpacity style={[styles.addChip, { backgroundColor: primaryColor }]} onPress={() => openAddForm('tv')}>
+                <Ionicons name="add" size={IS_TV ? 28 : 20} color="#fff" />
+              </TouchableOpacity>
+            </ScrollView>
+            {seriesCategory === 'custom' ? (
+              <FlatList
+                data={customSeries}
+                keyExtractor={(item: MediaItem) => item.id}
+                numColumns={MEDIA_COLS}
+                contentContainerStyle={{ paddingHorizontal: T.space.lg, paddingBottom: 24, paddingTop: T.space.sm }}
+                columnWrapperStyle={MEDIA_COLS > 1 ? { gap: T.space.md, marginBottom: T.space.md } : undefined}
+                renderItem={({ item }: { item: MediaItem }) => (
+                  <TouchableOpacity style={styles.mediaCard} onPress={() => openDetail(item)} activeOpacity={0.85}>
+                    <Image source={{ uri: item.poster }} style={styles.mediaPoster} resizeMode="cover" />
+                    <View style={styles.mediaInfo}>
+                      <Text style={styles.mediaTitle} numberOfLines={2}>{item.title}</Text>
+                      <Text style={styles.mediaMeta}>{item.seasons} temporadas</Text>
+                    </View>
+                  </TouchableOpacity>
+                )}
+              />
+            ) : (
+              <FlatList
+                data={series}
+                keyExtractor={item => item.id}
+                numColumns={MEDIA_COLS}
+                contentContainerStyle={{ paddingHorizontal: T.space.lg, paddingBottom: 24, paddingTop: T.space.sm }}
+                columnWrapperStyle={MEDIA_COLS > 1 ? { gap: T.space.md, marginBottom: T.space.md } : undefined}
+                onEndReached={loadMoreSeries}
+                onEndReachedThreshold={0.5}
+                renderItem={({ item }) => (
+                  <TouchableOpacity style={styles.mediaCard} onPress={() => openDetail(item)} activeOpacity={0.85}>
+                    <Image source={{ uri: item.poster }} style={styles.mediaPoster} resizeMode="cover" />
+                    <View style={styles.mediaCardOverlay} />
+                    <View style={styles.mediaInfo}>
+                      <Text style={styles.mediaTitle} numberOfLines={2}>{item.title}</Text>
+                      <View style={[styles.ratingBadge, { backgroundColor: primaryColor + '25' }]}>
+                        <Text style={[styles.ratingText, { color: primaryColor }]}>⭐ {item.rating}</Text>
+                      </View>
+                    </View>
+                  </TouchableOpacity>
+                )}
+              />
+            )}
+          </View>
+        )}
+
+        {/* ══════════ AJUSTES ══════════ */}
+        {activeTab === 3 && (
+          <ScrollView style={styles.pageScroll} contentContainerStyle={{ paddingBottom: 24 }}>
+            <Text style={styles.pageTitle}>Ajustes</Text>
+            <TouchableOpacity style={styles.settingItem} onPress={() => setRelacionAspecto(prev => prev === 'Ajustar' ? 'Estirar' : 'Ajustar')}>
+              <Text style={styles.settingLabel}>Modo de pantalla</Text>
+              <Text style={[styles.settingValue, { color: primaryColor }]}>{relacionAspecto}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.settingItem} onPress={() => cargarListaM3U()}>
+              <Text style={styles.settingLabel}>Actualizar canales</Text>
+              <Text style={[styles.settingValue, { color: primaryColor }]}>🔄</Text>
+            </TouchableOpacity>
+            <View style={styles.settingItem}>
+              <Text style={styles.settingLabel}>Color de acento</Text>
+              <View style={{ flexDirection: 'row' }}>
+                {Object.entries(ACCENT_COLORS).map(([key, color]) => (
+                  <TouchableOpacity
+                    key={key}
+                    onPress={() => setAccentColor(key)}
+                    style={[styles.colorOption, { backgroundColor: color, borderWidth: accentColor === key ? 3 : 1, borderColor: accentColor === key ? '#fff' : color }]}
+                  />
+                ))}
+              </View>
+            </View>
+            <View style={styles.settingItem}>
+              <Text style={styles.settingLabel}>Identificador de App</Text>
+              <Text style={styles.settingValue} selectable>{appId}</Text>
+            </View>
+            <View style={styles.settingItem}>
+              <Text style={styles.settingLabel}>Versión</Text>
+              <Text style={styles.settingValue}>3.2.1</Text>
+            </View>
+          </ScrollView>
+        )}
+      </Animated.View>
+
+      {/* Tab Bar */}
+      <View style={styles.tabBar}>
+        {[
+          { label: 'TV',        icon: 'tv-outline',       iconActive: 'tv',       index: 0 },
+          { label: 'Películas', icon: 'film-outline',     iconActive: 'film',     index: 1 },
+          { label: 'Series',    icon: 'videocam-outline', iconActive: 'videocam', index: 2 },
+          { label: 'Ajustes',   icon: 'settings-outline', iconActive: 'settings', index: 3 },
+        ].map(tab => (
+          <TouchableOpacity key={tab.index} style={styles.tabItem} onPress={() => changeTab(tab.index)} activeOpacity={0.7}>
+            {activeTab === tab.index && <View style={[styles.tabIndicator, { backgroundColor: primaryColor }]} />}
+            <Ionicons
+              name={activeTab === tab.index ? tab.iconActive : tab.icon}
+              size={IS_TV ? 30 : 22}
+              color={activeTab === tab.index ? primaryColor : T.color.textMuted}
+            />
+            <Text style={[styles.tabLabel, activeTab === tab.index && { color: T.color.textPrimary, fontWeight: T.font.bold }]}>
+              {tab.label}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      {/* OSD */}
+      {numeroMarcado !== '' && (
+        <View style={styles.osdNumero}>
+          <Text style={[styles.osdNumeroTexto, { color: primaryColor }]}>{numeroMarcado}</Text>
+        </View>
+      )}
+      {errorCanal && (
+        <View style={styles.osdError}>
+          <Text style={styles.osdErrorTexto}>CANAL NO ENCONTRADO</Text>
+        </View>
+      )}
+
+      {/* Toast */}
+      {toastMsg !== '' && (
+        <Animated.View style={[styles.toast, {
+          opacity: toastAnim,
+          transform: [{ translateY: toastAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }],
+        }]}>
+          <Ionicons name="information-circle" size={18} color={primaryColor} />
+          <Text style={styles.toastText}>{toastMsg}</Text>
+        </Animated.View>
+      )}
+
+      {/* WebView estándar */}
+      {cazando && canalSeleccionado && !canalSeleccionado.needsWebView && (
+        <View style={styles.webviewOculto}>
+          <WebView
+            ref={webViewRef}
+            source={{
+              uri: canalSeleccionado.url,
+              headers: {
+                'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+                'Accept-Language': 'es-ES,es;q=0.9',
+                'Referer':         'https://pluto.tv/',
+              },
+            }}
+            originWhitelist={['*']}
+            javaScriptEnabled
+            domStorageEnabled
+            cacheEnabled={false}
+            mediaPlaybackRequiresUserAction={false}
+            allowsInlineMediaPlayback
+            setSupportMultipleWindows={true}
+            mixedContentMode="always"
+            userAgent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            injectedJavaScriptBeforeContentLoaded={`
+              (function() {
+                if (window.__NEXUS__) return;
+                window.__NEXUS__ = true;
+                function post(url) {
+                  try {
+                    if (typeof url === 'string' && /(?:\\.m3u8|\\.mpd)(?:\\?|#|$)/i.test(url)) {
+                      window.ReactNativeWebView.postMessage('FOUND_MANIFEST:' + url);
+                      window.ReactNativeWebView.postMessage(String(url));
+                    }
+                  } catch(e) {}
+                }
+                try { var open = XMLHttpRequest.prototype.open; XMLHttpRequest.prototype.open = function(method, url) { try { post(url); } catch(e) {} return open.apply(this, arguments); }; } catch(e) {}
+                try { var origFetch = window.fetch; if (origFetch) { window.fetch = function(input, init) { try { var u = ''; if (typeof input === 'string') u = input; else if (input && input.url) u = input.url; post(u); } catch(e) {} return origFetch.apply(this, arguments).then(function(r) { try { if (r && r.url) post(r.url); } catch(e) {} return r; }); }; } } catch(e) {}
+                try {
+                  var observer = new MutationObserver(function(mutations) {
+                    mutations.forEach(function(m) {
+                      m.addedNodes.forEach(function(node) {
+                        if (node.nodeName === 'VIDEO') { var src = node.src || node.currentSrc; post(src); node.addEventListener('loadedmetadata', function() { post(node.currentSrc); }); }
+                        if (node.nodeName === 'IFRAME') { window.ReactNativeWebView.postMessage('IFRAME_SRC:' + node.src); }
+                      });
+                    });
+                  });
+                  observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
+                } catch(e) {}
+              })(); true;
+            `}
+            injectedJavaScript={`
+              (function() {
+                setTimeout(function() {
+                  try {
+                    var playButtons = document.querySelectorAll('button[aria-label="Play"], button[title="Play"], .play-button, .vjs-big-play-button, [data-action="play"], .play-btn');
+                    for (var i=0; i<playButtons.length; i++) playButtons[i].click();
+                    var videos = document.getElementsByTagName('video');
+                    for (var j=0; j<videos.length; j++) videos[j].play();
+                    var iframes = document.getElementsByTagName('iframe');
+                    for (var k=0; k<iframes.length; k++) window.ReactNativeWebView.postMessage('IFRAME_SRC:' + iframes[k].src);
+                  } catch(e) {}
+                  setTimeout(function() {
+                    try {
+                      var el = document.elementFromPoint(window.innerWidth/2, window.innerHeight/2);
+                      if (el) el.click();
+                    } catch(e) {}
+                  }, 5000);
+                }, 5000);
+              })(); true;
+            `}
+            onLoadEnd={() => { setTimeout(() => { injectPlayScript(); }, 2000); }}
+            onShouldStartLoadWithRequest={(req) => {
+              const encontrada = extraerUrlManifiesto(String(req.url || ''));
+              if (encontrada) { setLinkM3u8(encontrada); setCazando(false); limpiarCaza(); return false; }
+              return true;
+            }}
+            onNavigationStateChange={(nav) => {
+              const encontrada = extraerUrlManifiesto(String(nav.url || ''));
+              if (encontrada) { setLinkM3u8(encontrada); setCazando(false); limpiarCaza(); }
+            }}
+            onMessage={alRecibirMensajeWeb}
+            onError={() => { setCazando(false); limpiarCaza(); }}
+            onHttpError={() => { setCazando(false); limpiarCaza(); }}
+            style={styles.webviewOculto}
+          />
+        </View>
+      )}
+
+      {/* WebView TNT */}
+      {tntNecesitaWebView && canalSeleccionado?.needsWebView && (
+        <View style={styles.webviewOculto}>
+          <WebView
+            ref={tntWebViewRef}
+            source={{
+              uri: cacheBust(canalSeleccionado.url),
+              headers: {
+                'User-Agent':      'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36',
+                'Accept-Language': 'es-AR,es;q=0.9',
+                'Referer':         `https://embed.saohgdasregions.fun/embed2/${(canalSeleccionado.url.match(/[?&]canal=([^&]+)/i) || [])[1] ?? ''}.html`,
+                'Origin':          'https://embed.saohgdasregions.fun',
+              },
+            }}
+            originWhitelist={['*']}
+            javaScriptEnabled
+            domStorageEnabled
+            cacheEnabled={false}
+            mediaPlaybackRequiresUserAction={false}
+            allowsInlineMediaPlayback
+            setSupportMultipleWindows={true}
+            mixedContentMode="always"
+            userAgent="Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+            injectedJavaScriptBeforeContentLoaded={TNT_INJECTION_BEFORE}
+            injectedJavaScript={TNT_INJECTION_AFTER}
+            onShouldStartLoadWithRequest={(req) => {
+              const encontrada = extraerUrlManifiesto(req.url);
+              if (encontrada) { setLinkM3u8(encontrada); setTntBuscando(false); setTntNecesitaWebView(false); limpiarCaza(); return false; }
+              return true;
+            }}
+            onNavigationStateChange={(nav) => {
+              const encontrada = extraerUrlManifiesto(nav.url);
+              if (encontrada) { setLinkM3u8(encontrada); setTntBuscando(false); setTntNecesitaWebView(false); limpiarCaza(); }
+            }}
+            onMessage={alRecibirMensajeTNT}
+            onError={() => { setTntBuscando(false); setTntNecesitaWebView(false); limpiarCaza(); }}
+            onHttpError={() => { setTntBuscando(false); setTntNecesitaWebView(false); limpiarCaza(); }}
+            style={styles.webviewOculto}
+          />
+        </View>
+      )}
+
+      {/* Modales */}
+      <DetailModal
+        visible={detailVisible}
+        item={selectedMedia}
+        onClose={closeDetail}
+        primaryColor={primaryColor}
+        onToggleWatchlist={toggleWatchlist}
+        isInWatchlist={selectedMedia ? watchlist.includes(selectedMedia.id) : false}
+        onPlay={playVod}
+      />
+
+      <Modal visible={showAddForm} animationType="fade" transparent>
+        <View style={styles.modalOverlay}>
+          <AddContentForm
+            onAdd={currentAddType === 'movie' ? handleAddCustomMovie : handleAddCustomSeries}
+            onCancel={() => setShowAddForm(false)}
+            type={currentAddType}
+          />
+        </View>
+      </Modal>
+    </View>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ESTILOS PREMIUM — Netflix / Disney+ style
+═══════════════════════════════════════════════════════════ */
+const styles = StyleSheet.create({
+
+  /* ── Global ─────────────────────────────────────────── */
+  container:   { flex: 1, backgroundColor: T.color.bg },
+  inputOculto: { position: 'absolute', top: -200, left: -200, opacity: 0, width: 1, height: 1 },
+
+  /* ── Header ─────────────────────────────────────────── */
+  header: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: T.space.lg,
+    paddingTop: Platform.OS === 'ios' ? 54 : IS_TV ? 24 : 36,
+    paddingBottom: T.space.md,
+    backgroundColor: 'rgba(8,8,16,0.97)',
+    borderBottomWidth: 1, borderBottomColor: T.color.border,
+  },
+  headerLogo: {
+    fontSize: IS_TV ? fs(T.font.xxl) : T.font.xl,
+    fontWeight: T.font.black,
+    color: T.color.textPrimary,
+    letterSpacing: T.font.wider,
+    textTransform: 'uppercase',
+  },
+  headerLogoAccent: { color: T.color.primary },
+  headerActions:    { flexDirection: 'row', alignItems: 'center', gap: T.space.sm },
+  headerIconBtn:    {
+    width: s(36), height: s(36), borderRadius: T.radius.full,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+
+  /* ── Mini Player ─────────────────────────────────────── */
+  miniPlayerContainer: {
+    width: '100%', height: MINI_PLAYER_HEIGHT,
+    backgroundColor: '#000', overflow: 'hidden',
+    borderBottomWidth: IS_TV ? 3 : 2,
+    borderBottomColor: T.color.primary,
+  },
+  miniPlayerPlaceholder: {
+    flex: 1, width: '100%',
+    justifyContent: 'center', alignItems: 'center',
+    backgroundColor: T.color.surface,
+  },
+  miniPlayerText: {
+    color: T.color.textMuted,
+    fontSize: IS_TV ? fs(20) : T.font.base,
+    marginTop: T.space.sm,
+  },
+  gradientOverlay: {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    height: IS_TV ? s(100) : s(70),
+    backgroundColor: T.color.overlay,
+    justifyContent: 'flex-end',
+  },
+  miniPlayerInfo: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: IS_TV ? T.space.xl : T.space.md,
+    paddingBottom: T.space.sm,
+  },
+  miniPlayerCh:   { fontWeight: T.font.black, fontSize: IS_TV ? fs(32) : T.font.xl, fontFamily: 'monospace' },
+  miniPlayerName: { color: T.color.textPrimary, fontWeight: T.font.bold, fontSize: IS_TV ? fs(22) : T.font.md },
+  nowPlayingText: { color: T.color.textSecondary, fontSize: IS_TV ? fs(15) : T.font.sm, marginTop: 2 },
+  vodPosterSmall: { width: s(IS_TV ? 50 : 36), height: s(IS_TV ? 75 : 54), borderRadius: T.radius.sm },
+
+  playerTopBar: {
+    position: 'absolute', top: 0, left: 0, right: 0,
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: T.space.md,
+    paddingTop: T.space.sm,
+    paddingBottom: T.space.md,
+  },
+  playerLivePill: {
+    flexDirection: 'row', alignItems: 'center', gap: T.space.xs + 1,
+    backgroundColor: T.color.live, alignSelf: 'flex-start',
+    paddingHorizontal: T.space.sm, paddingVertical: 4, borderRadius: T.radius.full,
+  },
+  playerLiveDot:  { width: 6, height: 6, borderRadius: 3, backgroundColor: '#fff' },
+  playerLiveText: { fontSize: T.font.xs, fontWeight: T.font.black, color: '#fff', letterSpacing: 1 },
+  playerIconBtn: {
+    width: s(IS_TV ? 44 : 30), height: s(IS_TV ? 44 : 30),
+    alignItems: 'center', justifyContent: 'center',
+    borderRadius: T.radius.full, backgroundColor: 'rgba(255,255,255,0.15)',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)',
+  },
+
+  channelNavLeft:  { position: 'absolute', left:  s(IS_TV ? 20 : 10), top: '50%', marginTop: -s(14), zIndex: 20 },
+  channelNavRight: { position: 'absolute', right: s(IS_TV ? 20 : 10), top: '50%', marginTop: -s(14), zIndex: 20 },
+
+  bufferingOverlay: {
+    position: 'absolute',
+    top: MINI_PLAYER_HEIGHT / 2 - s(20),
+    left: '50%', marginLeft: -s(20), zIndex: 25,
+  },
+  volumeBrightnessFeedback: {
+    position: 'absolute', top: MINI_PLAYER_HEIGHT + s(10),
+    alignSelf: 'center', backgroundColor: T.color.overlay,
+    borderRadius: T.radius.md, padding: T.space.md,
+    flexDirection: 'row', zIndex: 30,
+    borderWidth: 1, borderColor: T.color.border,
+  },
+  feedbackText: { color: T.color.textPrimary, marginHorizontal: T.space.sm, fontSize: IS_TV ? fs(16) : T.font.sm },
+
+  /* ── Fullscreen ──────────────────────────────────────── */
+  fullscreenContainer: { flex: 1, backgroundColor: '#000' },
+  fullscreenExit: {
+    position: 'absolute', top: IS_TV ? 30 : 40, right: IS_TV ? 30 : 20, zIndex: 30,
+    backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: s(18),
+    width: s(36), height: s(36),
+    justifyContent: 'center', alignItems: 'center',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)',
+  },
+
+  /* ── Layout principal ────────────────────────────────── */
+  tabContent: { flex: 1 },
+
+  /* ── Tab TV ──────────────────────────────────────────── */
+  tvTab: {
+    flex: 1,
+    paddingHorizontal: IS_TV ? T.space.xl : T.space.lg,
+    paddingTop: T.space.lg,
+  },
+  searchInputField: {
+    backgroundColor: T.color.surfaceElevated,
+    color: T.color.textPrimary,
+    borderRadius: T.radius.lg,
+    paddingHorizontal: T.space.lg,
+    paddingVertical: IS_TV ? s(14) : T.space.md,
+    fontSize: IS_TV ? fs(18) : T.font.base,
+    marginBottom: T.space.md,
+    borderWidth: 1,
+    borderColor: T.color.border,
+  },
+  searchHistoryRow:  { marginBottom: T.space.md },
+  searchHistoryChip: {
+    paddingHorizontal: T.space.md,
+    paddingVertical: T.space.sm,
+    backgroundColor: T.color.surfaceElevated,
+    borderRadius: T.radius.full,
+    marginRight: T.space.sm,
+    borderWidth: 1,
+    borderColor: T.color.border,
+  },
+  searchHistoryText: { color: T.color.textSecondary, fontSize: IS_TV ? fs(14) : T.font.sm },
+  recentRow:         { marginBottom: T.space.md },
+  recentChip: {
+    paddingHorizontal: T.space.lg,
+    paddingVertical: T.space.sm,
+    borderRadius: T.radius.full,
+    marginRight: T.space.sm,
+  },
+  recentChipText: { color: '#fff', fontSize: IS_TV ? fs(14) : T.font.sm, fontWeight: T.font.semibold },
+
+  /* ── Categorías ──────────────────────────────────────── */
+  catScroll:    { marginBottom: T.space.md },
+  categoryMenu: { marginBottom: T.space.md },
+  categoryChip: {
+    paddingHorizontal: IS_TV ? T.space.xl : T.space.lg,
+    paddingVertical:   IS_TV ? s(12) : T.space.sm,
+    borderRadius: T.radius.full,
+    backgroundColor: T.color.surfaceElevated,
+    borderWidth: 1,
+    borderColor: T.color.border,
+    marginRight: T.space.sm,
+  },
+  categoryChipActive: {
+    backgroundColor: T.color.primary,
+    borderColor: T.color.primary,
+    ...T.shadow.glow,
+  },
+  categoryChipText: {
+    fontSize: IS_TV ? fs(16) : T.font.sm,
+    fontWeight: T.font.semibold,
+    color: T.color.textSecondary,
+    letterSpacing: T.font.wide,
+    textTransform: 'uppercase',
+  },
+  categoryChipTextActive: { color: T.color.textPrimary },
+  addChip: {
+    width: s(IS_TV ? 52 : 40),
+    height: s(IS_TV ? 52 : 40),
+    borderRadius: s(IS_TV ? 26 : 20),
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: T.space.sm,
+  },
+
+  /* ── Filas de canal ──────────────────────────────────── */
+  channelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: T.color.surface,
+    marginBottom: T.space.sm,
+    borderRadius: IS_TV ? T.radius.xl : T.radius.lg,
+    paddingVertical:   IS_TV ? s(18) : T.space.md,
+    paddingHorizontal: IS_TV ? s(22) : T.space.lg,
+    borderWidth: 1,
+    borderColor: T.color.border,
+    minHeight: IS_TV ? s(88) : s(72),
+  },
+  channelRowActive: {
+    backgroundColor: T.color.primaryDim,
+    borderColor: T.color.borderGlow,
+  },
+  channelNumberBadge: {
+    width: IS_TV ? s(56) : s(42),
+    height: IS_TV ? s(38) : s(30),
+    borderRadius: T.radius.md,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: IS_TV ? T.space.lg : T.space.md,
+  },
+  channelNumberText: {
+    fontWeight: T.font.bold,
+    fontSize: IS_TV ? fs(18) : T.font.sm,
+    fontFamily: 'monospace',
+  },
+  channelName: {
+    color: T.color.textPrimary,
+    fontSize: IS_TV ? fs(19) : T.font.base,
+    fontWeight: T.font.semibold,
+    marginBottom: 3,
+  },
+  channelNameActive: { color: '#fff', fontWeight: T.font.extrabold },
+  channelNowPlaying: {
+    color: T.color.textMuted,
+    fontSize: IS_TV ? fs(13) : T.font.xs,
+    marginTop: 1,
+  },
+  channelLogoSmall: {
+    width: IS_TV ? s(48) : s(36),
+    height: IS_TV ? s(48) : s(36),
+    borderRadius: T.radius.md,
+    marginLeft: T.space.md,
+    resizeMode: 'contain',
+    backgroundColor: T.color.surfaceElevated,
+  },
+  logoPlaceholderSmall: {
+    width: IS_TV ? s(48) : s(36),
+    height: IS_TV ? s(48) : s(36),
+    borderRadius: T.radius.md,
+    backgroundColor: T.color.surfaceElevated,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: T.space.md,
+  },
+  skeletonRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    height: IS_TV ? s(88) : s(72),
+    borderRadius: T.radius.lg,
+    paddingHorizontal: T.space.lg,
+    backgroundColor: T.color.surface,
+  },
+
+  /* ── Páginas de contenido ─────────────────────────────── */
+  pageContainer: { flex: 1, paddingTop: T.space.md },
+  pageScroll:    { flex: 1, padding: IS_TV ? T.space.xl : T.space.lg },
+  pageTitle: {
+    color: T.color.textPrimary,
+    fontSize: IS_TV ? fs(34) : T.font.xxl,
+    fontWeight: T.font.black,
+    marginBottom: IS_TV ? T.space.xl : T.space.lg,
+  },
+
+  /* ── Tarjeta de media — Netflix/Disney+ ──────────────── */
+  mediaCard: {
+    flex: 1,
+    backgroundColor: T.color.surface,
+    borderRadius: IS_TV ? T.radius.xl : T.radius.lg,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: T.color.border,
+    ...T.shadow.card,
+  },
+  mediaPoster: {
+    width: '100%',
+    height: IS_TV ? 320 : IS_TABLET ? 270 : 230,
+    backgroundColor: T.color.surfaceElevated,
+  },
+  mediaCardOverlay: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: '48%',
+    backgroundColor: 'rgba(8,8,16,0.80)',
+  },
+  mediaInfo: {
+    padding: IS_TV ? T.space.lg : T.space.md,
+    gap: T.space.xs,
+  },
+  mediaTitle: {
+    color: T.color.textPrimary,
+    fontSize: IS_TV ? fs(17) : T.font.base,
+    fontWeight: T.font.bold,
+    lineHeight: IS_TV ? 24 : 20,
+  },
+  mediaMeta: {
+    color: T.color.textMuted,
+    fontSize: IS_TV ? fs(13) : T.font.xs,
+  },
+  ratingBadge: {
+    alignSelf: 'flex-start',
+    borderRadius: T.radius.sm,
+    paddingHorizontal: T.space.sm,
+    paddingVertical: 3,
+    marginTop: T.space.xs,
+  },
+  ratingText: {
+    fontSize: IS_TV ? fs(13) : T.font.xs,
+    fontWeight: T.font.bold,
+  },
+  mediaCardBadge: {
+    position: 'absolute',
+    top: T.space.md,
+    right: T.space.md,
+    backgroundColor: T.color.primary,
+    paddingHorizontal: T.space.sm,
+    paddingVertical: 3,
+    borderRadius: T.radius.sm,
+  },
+  mediaCardBadgeText: {
+    fontSize: 9,
+    fontWeight: T.font.black,
+    color: '#fff',
+    letterSpacing: 0.8,
+  },
+
+  /* ── Ajustes ─────────────────────────────────────────── */
+  settingItem: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    backgroundColor: T.color.surface,
+    borderRadius: IS_TV ? T.radius.lg : T.radius.md,
+    padding: IS_TV ? s(22) : T.space.lg,
+    marginBottom: IS_TV ? T.space.lg : T.space.md,
+    borderWidth: 1, borderColor: T.color.border,
+  },
+  settingLabel: { color: T.color.textPrimary, fontSize: IS_TV ? fs(20) : T.font.md, fontWeight: T.font.semibold },
+  settingValue: { color: T.color.textSecondary, fontSize: IS_TV ? fs(18) : T.font.base, fontWeight: T.font.bold },
+  colorOption:  {
+    width: IS_TV ? s(40) : s(30), height: IS_TV ? s(40) : s(30),
+    borderRadius: IS_TV ? s(20) : s(15), marginLeft: T.space.sm,
+  },
+
+  /* ── Tab Bar ─────────────────────────────────────────── */
+  tabBar: {
+    flexDirection: 'row',
+    backgroundColor: T.color.surface,
+    borderTopWidth: 1, borderTopColor: T.color.border,
+    paddingBottom: Platform.OS === 'ios' ? 26 : IS_TV ? 16 : 10,
+    paddingTop:    IS_TV ? 14 : 10,
+    paddingHorizontal: IS_TV ? T.space.xxl : T.space.sm,
+  },
+  tabItem:      { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 3 },
+  tabLabel:     { fontSize: IS_TV ? fs(13) : T.font.xs, color: T.color.textMuted, fontWeight: T.font.medium, letterSpacing: T.font.wide },
+  tabIndicator: { position: 'absolute', top: 0, width: s(IS_TV ? 14 : 24), height: 2, borderRadius: T.radius.full },
+
+  /* ── OSD ─────────────────────────────────────────────── */
+  osdNumero: {
+    position: 'absolute',
+    top: MINI_PLAYER_HEIGHT + T.space.lg,
+    right: IS_TV ? T.space.xxl : T.space.lg,
+    backgroundColor: T.color.overlay,
+    paddingHorizontal: IS_TV ? T.space.xl : T.space.lg,
+    paddingVertical: IS_TV ? T.space.md : T.space.xs + 1,
+    borderRadius: T.radius.md,
+    borderWidth: 2, borderColor: T.color.primary, zIndex: 999,
+  },
+  osdNumeroTexto: { fontSize: IS_TV ? fs(56) : fs(38), fontWeight: T.font.black, fontFamily: 'monospace' },
+  osdError: {
+    position: 'absolute',
+    top: MINI_PLAYER_HEIGHT + T.space.lg,
+    right: IS_TV ? T.space.xxl : T.space.lg,
+    backgroundColor: '#C0392B',
+    paddingHorizontal: IS_TV ? T.space.xl : T.space.lg,
+    paddingVertical: IS_TV ? T.space.md : T.space.sm,
+    borderRadius: T.radius.md, zIndex: 999,
+  },
+  osdErrorTexto: { color: '#fff', fontSize: IS_TV ? fs(16) : T.font.sm, fontWeight: T.font.bold, letterSpacing: 1 },
+
+  /* ── WebView oculto ──────────────────────────────────── */
+  webviewOculto: { position: 'absolute', width: 1, height: 1, left: 0, top: 0, opacity: 0.01 },
+
+  /* ── Modal de detalle ────────────────────────────────── */
+  detailContainer: { flex: 1, backgroundColor: T.color.bg },
+  detailPoster:    { width: '100%', height: IS_TV ? H * 0.55 : IS_TABLET ? 480 : 380 },
+  detailClose:     { position: 'absolute', top: IS_TV ? s(30) : 40, right: IS_TV ? s(30) : T.space.lg, zIndex: 10 },
+  detailInfo:      { padding: IS_TV ? T.space.xxl : T.space.lg },
+  detailTitle:     { color: T.color.textPrimary, fontSize: IS_TV ? fs(36) : T.font.xxl, fontWeight: T.font.black, marginBottom: T.space.md },
+  detailRating:    { fontSize: IS_TV ? fs(20) : T.font.md, fontWeight: T.font.bold },
+  detailYear:      { color: T.color.textSecondary, fontSize: IS_TV ? fs(17) : T.font.sm, marginLeft: T.space.xs },
+  detailOverview:  { color: T.color.textSecondary, fontSize: IS_TV ? fs(17) : T.font.base, lineHeight: IS_TV ? s(28) : 22, marginTop: T.space.md },
+  watchlistButton: { padding: IS_TV ? s(18) : T.space.md, borderRadius: T.radius.md, alignItems: 'center' },
+
+  /* ── Modal agregar contenido ─────────────────────────── */
+  modalOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.85)',
+    justifyContent: 'center', alignItems: 'center',
+  },
+  addFormContainer: {
+    backgroundColor: T.color.surface, borderRadius: T.radius.lg,
+    padding: IS_TV ? T.space.xxl : T.space.lg,
+    width: IS_TV ? '50%' : IS_TABLET ? '65%' : '92%',
+    borderWidth: 1, borderColor: T.color.border,
+    ...T.shadow.card,
+  },
+  addFormTitle: {
+    color: T.color.textPrimary, fontSize: IS_TV ? fs(24) : T.font.lg,
+    fontWeight: T.font.bold, marginBottom: IS_TV ? T.space.lg : T.space.md,
+  },
+  addInput: {
+    backgroundColor: T.color.surfaceElevated, color: T.color.textPrimary,
+    borderRadius: T.radius.md, paddingHorizontal: T.space.md,
+    paddingVertical: IS_TV ? s(14) : T.space.md,
+    fontSize: IS_TV ? fs(17) : T.font.base, marginBottom: T.space.md,
+    borderWidth: 1, borderColor: T.color.border,
+  },
+  addButton: {
+    flex: 1, borderRadius: T.radius.md,
+    padding: IS_TV ? s(16) : T.space.md, alignItems: 'center',
+    marginRight: T.space.sm, backgroundColor: T.color.primary,
+    ...T.shadow.glow,
+  },
+  cancelButton: {
+    flex: 1, borderRadius: T.radius.md,
+    padding: IS_TV ? s(16) : T.space.md, alignItems: 'center',
+    backgroundColor: T.color.surfaceElevated,
+    borderWidth: 1, borderColor: T.color.border,
+  },
+
+  /* ── Perfil ──────────────────────────────────────────── */
+  profileAvatar: {
+    width: IS_TV ? s(44) : 30, height: IS_TV ? s(44) : 30,
+    borderRadius: T.radius.full, backgroundColor: T.color.primary,
+    alignItems: 'center', justifyContent: 'center',
+    ...T.shadow.glow,
+  },
+  profileAvatarText: { fontSize: IS_TV ? fs(20) : 13, fontWeight: T.font.black, color: '#fff' },
+
+  /* ── Toast ───────────────────────────────────────────── */
+  toast: {
+    position: 'absolute', bottom: 90, left: T.space.lg, right: T.space.lg,
+    backgroundColor: T.color.surfaceElevated, borderRadius: T.radius.md,
+    paddingHorizontal: T.space.md, paddingVertical: T.space.sm + 2,
+    flexDirection: 'row', alignItems: 'center', gap: T.space.sm,
+    borderWidth: 1, borderColor: T.color.border,
+    ...T.shadow.card,
+  },
+  toastText: { flex: 1, fontSize: T.font.sm, color: T.color.textPrimary, fontWeight: T.font.medium },
+});
+
+/* ═══════════════════════════════════════════════════════════
+   ESTILOS EXCLUSIVOS DEL SPLASH
+═══════════════════════════════════════════════════════════ */
+const sp = StyleSheet.create({
+  root: {
+    flex: 1, backgroundColor: T.color.bg,
+    alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
+  },
+  bgOrb1: {
+    position: 'absolute', width: s(300), height: s(300), borderRadius: s(150),
+    backgroundColor: 'rgba(229,9,20,0.10)', top: -s(40), left: -s(60),
+  },
+  bgOrb2: {
+    position: 'absolute', width: s(380), height: s(380), borderRadius: s(190),
+    backgroundColor: 'rgba(229,9,20,0.06)', bottom: -s(90), right: -s(90),
+  },
+  bgOrb3: {
+    position: 'absolute', width: s(200), height: s(200), borderRadius: s(100),
+    backgroundColor: 'rgba(229,9,20,0.08)', top: '38%', right: -s(30),
+  },
+  particle: {
+    position: 'absolute', width: s(9), height: s(9),
+    borderRadius: s(5), backgroundColor: 'rgba(255,255,255,0.3)',
+  },
+  particleSmall: {
+    position: 'absolute', width: s(6), height: s(6),
+    borderRadius: s(3), backgroundColor: T.color.primary,
+  },
+  particleSmall2: {
+    position: 'absolute', width: s(7), height: s(7),
+    borderRadius: s(4), backgroundColor: 'rgba(229,9,20,0.75)',
+  },
+  centerWrap: { alignItems: 'center', justifyContent: 'center' },
+  logoGlow: {
+    position: 'absolute', top: -s(20),
+    width: s(200), height: s(200), borderRadius: s(100),
+    backgroundColor: 'rgba(229,9,20,0.16)',
+  },
+  logoOuterRing: {
+    width: s(160), height: s(160), borderRadius: s(80),
+    borderWidth: 1.5, borderColor: 'rgba(229,9,20,0.65)',
+    justifyContent: 'center', alignItems: 'center', marginBottom: -s(144),
+  },
+  ringAccentTop:    { position: 'absolute', top: -1,    width: s(36), height: s(6),  borderRadius: s(8), backgroundColor: T.color.primary },
+  ringAccentBottom: { position: 'absolute', bottom: -1, width: s(28), height: s(6),  borderRadius: s(8), backgroundColor: T.color.primary },
+  ringAccentLeft:   { position: 'absolute', left: -1,   width: s(6),  height: s(28), borderRadius: s(8), backgroundColor: T.color.primary },
+  ringAccentRight:  { position: 'absolute', right: -1,  width: s(6),  height: s(28), borderRadius: s(8), backgroundColor: T.color.primary },
+  logoCore: {
+    width: s(128), height: s(128), borderRadius: s(32),
+    backgroundColor: T.color.bg, borderWidth: 1,
+    borderColor: 'rgba(229,9,20,0.55)',
+    justifyContent: 'center', alignItems: 'center', elevation: 14,
+  },
+  logoInnerFrame: {
+    width: s(100), height: s(100), borderRadius: s(26),
+    backgroundColor: T.color.surface,
+    borderWidth: 1, borderColor: T.color.border,
+    justifyContent: 'center', alignItems: 'center',
+  },
+  logoNWrap:     { width: s(54), height: s(54), position: 'relative' },
+  logoNBarLeft:  { position: 'absolute', left: 0,    top: 0, width: s(11), height: s(54), borderRadius: s(10), backgroundColor: '#FFF' },
+  logoNBarRight: { position: 'absolute', right: 0,   top: 0, width: s(11), height: s(54), borderRadius: s(10), backgroundColor: '#FFF' },
+  logoNDiag:     { position: 'absolute', left: s(22), top: -s(3), width: s(11), height: s(60), borderRadius: s(10), backgroundColor: T.color.primary, transform: [{ rotate: '-32deg' }] },
+  title: {
+    marginTop: s(28), color: T.color.textPrimary,
+    fontSize: IS_TV ? fs(52) : fs(36), fontWeight: T.font.black,
+    letterSpacing: IS_TV ? 8 : 4,
+  },
+  titleAccent: { color: T.color.primary },
+  sub: {
+    marginTop: s(8), color: T.color.textMuted,
+    fontSize: IS_TV ? fs(16) : fs(12),
+    letterSpacing: 3, fontWeight: T.font.extrabold,
+  },
+  progressTrack: {
+    width: s(240), height: s(6), borderRadius: T.radius.full,
+    backgroundColor: T.color.surfaceElevated, marginTop: s(28),
+    overflow: 'hidden', borderWidth: 1, borderColor: T.color.border,
+  },
+  progressFill:  { height: '100%', borderRadius: T.radius.full, backgroundColor: T.color.primary },
+  loadingText: {
+    marginTop: s(14), color: T.color.primary,
+    fontSize: IS_TV ? fs(14) : T.font.xs,
+    fontWeight: T.font.extrabold, letterSpacing: 2,
+  },
+  bottomBar: {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    height: 3, backgroundColor: T.color.primary, opacity: 0.6,
+  },
+});
